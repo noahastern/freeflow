@@ -20,6 +20,7 @@ struct FreeFlowTests {
         AppTextInsertionDispatchTests.run()
         await TranscriptionServiceTests.run()
         await APIConfigurationDraftTests.run()
+        VocabularyPromptTests.run()
         print("FreeFlowTests passed")
     }
 }

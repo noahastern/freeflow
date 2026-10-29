@@ -15,6 +15,7 @@ TEST_RUNNER = $(BUILD_DIR)/FreeFlowTests
 TEST_DISPATCH_HARNESS = $(BUILD_DIR)/AppTextInsertionDispatchHarness.swift
 TEST_PRODUCTION_SOURCES = \
 	Sources/APIConfigurationDraft.swift \
+	Sources/VocabularyPrompt.swift \
 	Sources/AppContextService.swift \
 	Sources/AppName.swift \
 	Sources/AppTextInsertionCore.swift \

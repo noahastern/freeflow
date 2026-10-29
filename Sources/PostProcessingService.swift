@@ -492,16 +492,7 @@ Behavior:
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = postProcessingTimeoutSeconds
 
-        let normalizedVocabulary = normalizedVocabularyText(customVocabulary)
-        let vocabularyPrompt = if !normalizedVocabulary.isEmpty {
-            """
-The following vocabulary must be treated as high-priority terms while rewriting.
-Use these spellings exactly in the output when relevant:
-\(normalizedVocabulary)
-"""
-        } else {
-            ""
-        }
+        let vocabularyPrompt = VocabularyPrompt.section(for: customVocabulary)
 
         var systemPrompt = Self.cleanupSystemPrompt(
             customSystemPrompt: customSystemPrompt,
@@ -622,16 +613,7 @@ Model: \(model)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = postProcessingTimeoutSeconds
 
-        let normalizedVocabulary = normalizedVocabularyText(customVocabulary)
-        let vocabularyPrompt = if !normalizedVocabulary.isEmpty {
-            """
-The following vocabulary must be treated as high-priority terms while rewriting.
-Use these spellings exactly in the output when relevant:
-\(normalizedVocabulary)
-"""
-        } else {
-            ""
-        }
+        let vocabularyPrompt = VocabularyPrompt.section(for: customVocabulary)
 
         var systemPrompt = Self.commandModeSystemPrompt
         let trimmedOutputLanguage = outputLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -904,14 +886,5 @@ Model: \(model)
 
         var seen = Set<String>()
         return terms.filter { seen.insert($0.lowercased()).inserted }
-    }
-
-    private func normalizedVocabularyText(_ vocabularyTerms: [String]) -> String {
-        let terms = vocabularyTerms
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        guard !terms.isEmpty else { return "" }
-        return terms.joined(separator: ", ")
     }
 }
