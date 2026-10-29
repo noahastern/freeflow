@@ -5,6 +5,7 @@ struct FreeFlowTests {
     static func main() async {
         AlertSoundPreferenceTests.run()
         AppStyleTests.run()
+        CleanupLevelTests.run()
         AppContextServiceTests.run()
         await LLMAPITransportTests.run()
         TemperatureCapabilityCacheTests.run()
@@ -12,6 +13,7 @@ struct FreeFlowTests {
         OverlayPlacementPreferenceTests.run()
         RecordingCaptureTimingTests.run()
         RecordingTimerPreferenceTests.run()
+        MicrophoneReadinessPreferenceTests.run()
         OriginalFieldInsertionPreferenceTests.run()
         ShortcutCoreTests.run()
         SemanticVersionTests.run()

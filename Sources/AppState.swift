@@ -229,7 +229,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let contextScreenshotMaxDimensionStorageKey = "context_screenshot_max_dimension"
     private let shortcutStartDelayStorageKey = "shortcut_start_delay"
     private let preserveClipboardStorageKey = "preserve_clipboard"
-    private let preserveExactWordingStorageKey = "preserve_exact_wording"
     private let keepDictationInClipboardHistoryStorageKey = "keep_dictation_in_clipboard_history"
     private let pressEnterVoiceCommandStorageKey = "press_enter_voice_command_enabled"
     private let alertSoundsEnabledStorageKey = "alert_sounds_enabled"
@@ -535,15 +534,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var microphoneReadiness: MicrophoneReadiness {
+        didSet {
+            UserDefaults.standard.set(microphoneReadiness.rawValue, forKey: MicrophoneReadinessPreference.storageKey)
+            applyMicrophoneReadiness()
+        }
+    }
+
     @Published var preserveClipboard: Bool {
         didSet {
             UserDefaults.standard.set(preserveClipboard, forKey: preserveClipboardStorageKey)
         }
     }
 
-    @Published var preserveExactWording: Bool {
+    @Published var cleanupLevel: CleanupLevel {
         didSet {
-            UserDefaults.standard.set(preserveExactWording, forKey: preserveExactWordingStorageKey)
+            cleanupLevel.save(to: .standard)
         }
     }
 
@@ -632,6 +638,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var selectedMicrophoneID: String {
         didSet {
             UserDefaults.standard.set(selectedMicrophoneID, forKey: selectedMicrophoneStorageKey)
+            applyMicrophoneReadiness()
         }
     }
     @Published var availableMicrophones: [AudioDevice] = []
@@ -643,6 +650,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var audioLevelCancellable: AnyCancellable?
     private var debugOverlayTimer: Timer?
     private var recordingInitializationTimer: DispatchSourceTimer?
+    private var microphoneCoolDownTimer: Timer?
     private var transcriptionTask: Task<Void, Never>?
     private var transcribingAudioFileName: String?
     private var contextService: AppContextService
@@ -742,7 +750,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let preserveClipboard = UserDefaults.standard.object(forKey: preserveClipboardStorageKey) == nil
             ? true
             : UserDefaults.standard.bool(forKey: preserveClipboardStorageKey)
-        let preserveExactWording = UserDefaults.standard.bool(forKey: preserveExactWordingStorageKey)
         let keepDictationInClipboardHistory = UserDefaults.standard.bool(forKey: keepDictationInClipboardHistoryStorageKey)
         let realtimeStreamingEnabled = UserDefaults.standard.bool(forKey: realtimeStreamingEnabledStorageKey)
         let realtimeStreamingModel = UserDefaults.standard.string(forKey: realtimeStreamingModelStorageKey) ?? ""
@@ -826,8 +833,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.outputLanguage = outputLanguage
         self.shortcutStartDelay = shortcutStartDelay
         self.originalFieldInsertionEnabled = OriginalFieldInsertionPreference.load(from: .standard)
+        self.microphoneReadiness = MicrophoneReadinessPreference.load(from: .standard)
         self.preserveClipboard = preserveClipboard
-        self.preserveExactWording = preserveExactWording
+        self.cleanupLevel = CleanupLevel.load(from: .standard)
         self.keepDictationInClipboardHistory = keepDictationInClipboardHistory
         self.realtimeStreamingEnabled = realtimeStreamingEnabled
         self.realtimeStreamingModel = realtimeStreamingModel
@@ -1335,7 +1343,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     appStyleSettings: self.appStyleSettings,
                     outputLanguage: self.outputLanguage,
                     dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
-                    preserveExactWording: self.preserveExactWording
+                    cleanupLevel: self.cleanupLevel
                 )
                 finalTranscript = result.finalTranscript
                 processingStatus = Self.statusMessage(
@@ -1777,6 +1785,69 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self?.handleEscapeKeyPress() ?? false
         }
         restartHotkeyMonitoring()
+        applyMicrophoneReadiness()
+    }
+
+    // MARK: Microphone readiness
+
+    /// `always` opens the microphone now, `off` releases it, and `afterUse`
+    /// keeps the microphone open only while its idle window is running.
+    private func applyMicrophoneReadiness() {
+        switch microphoneReadiness {
+        case .off:
+            cancelMicrophoneCoolDown()
+            audioRecorder.coolDown()
+        case .always:
+            cancelMicrophoneCoolDown()
+            warmMicrophoneIfAuthorized()
+        case .afterUse:
+            if microphoneCoolDownTimer == nil {
+                audioRecorder.coolDown()
+            } else {
+                warmMicrophoneIfAuthorized()
+            }
+        }
+    }
+
+    /// Starts or extends the `afterUse` window when a recording begins.
+    private func noteMicrophoneUse() {
+        guard microphoneReadiness == .afterUse else { return }
+        warmMicrophoneIfAuthorized()
+        scheduleMicrophoneCoolDown()
+    }
+
+    private func scheduleMicrophoneCoolDown() {
+        microphoneCoolDownTimer?.invalidate()
+        microphoneCoolDownTimer = Timer.scheduledTimer(
+            withTimeInterval: MicrophoneReadinessPreference.afterUseIdleTimeout,
+            repeats: false
+        ) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.microphoneCoolDownTimerFired()
+            }
+        }
+    }
+
+    private func microphoneCoolDownTimerFired() {
+        microphoneCoolDownTimer = nil
+        guard microphoneReadiness == .afterUse else { return }
+        // Count idle time from the end of a long dictation, not its start.
+        if isRecording || isTranscribing {
+            scheduleMicrophoneCoolDown()
+            return
+        }
+        audioRecorder.coolDown()
+    }
+
+    private func cancelMicrophoneCoolDown() {
+        microphoneCoolDownTimer?.invalidate()
+        microphoneCoolDownTimer = nil
+    }
+
+    private func warmMicrophoneIfAuthorized() {
+        // Warming up must never be what triggers the microphone permission prompt.
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        audioRecorder.warmUp(deviceUID: selectedMicrophoneID)
     }
 
     private func updateInsertionAccessibilityPreparation() {
@@ -2351,6 +2422,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             RecordingTimerPreference.load(from: .standard)
 
         let timingGeneration = audioRecorder.prepareRecordingTiming()
+        noteMicrophoneUse()
 
         // Show initializing dots only if engine takes longer than 0.2s to start
         var overlayShown = false
@@ -2463,6 +2535,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         statusText = "Error"
         overlayManager.dismiss()
         refreshAvailableMicrophonesIfNeeded()
+        // A failed recording releases its session; reopen it if readiness asks for one.
+        applyMicrophoneReadiness()
     }
 
     private func formattedRecordingStartError(_ error: Error) -> String {
@@ -2642,7 +2716,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         appStyleSettings: AppStyleSettings,
         outputLanguage: String = "",
         dictationLanguage: String = "",
-        preserveExactWording: Bool
+        cleanupLevel: CleanupLevel
     ) async -> (finalTranscript: String, outcome: TranscriptProcessingOutcome, prompt: String) {
         let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -2671,7 +2745,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return (macro.payload, .voiceMacro(command: macro.command), "")
         }
 
-        // Preserve-exact-wording mode. Two sub-cases so translation
+        // Cleanup level None (formerly "Preserve exact wording"). Two sub-cases so translation
         // stays honored:
         //
         //   1. No Output Language set — skip the LLM entirely and
@@ -2682,7 +2756,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         //      settings. The translate-only path preserves filler,
         //      informal wording, and profanity 1:1 while still hitting
         //      the target language.
-        if preserveExactWording {
+        if cleanupLevel == .none {
             let targetLanguage = outputLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
             if targetLanguage.isEmpty {
                 return (trimmedRawTranscript, .preservedExactWording, "")
@@ -2712,6 +2786,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     windowTitle: context.windowTitle,
                     settings: appStyleSettings
                 ),
+                cleanupLevel: cleanupLevel,
                 outputLanguage: outputLanguage,
                 dictationLanguage: dictationLanguage
             )
@@ -2881,7 +2956,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         appStyleSettings: self.appStyleSettings,
                         outputLanguage: self.outputLanguage,
                         dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
-                        preserveExactWording: self.preserveExactWording
+                        cleanupLevel: self.cleanupLevel
                     )
                     try Task.checkCancellation()
 

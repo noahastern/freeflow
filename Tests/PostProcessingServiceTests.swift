@@ -9,6 +9,41 @@ enum PostProcessingServiceTests {
         testFallbackModelReceivesSameDirective()
         testEnglishRequestIsUnchanged()
         testAppStyleAndVocabularyReachRequest()
+        testDefaultPromptAsksForParagraphBreaks()
+        testLightCleanupReachesRequest()
+    }
+
+    private static func testLightCleanupReachesRequest() {
+        let style = AppStyleResolver.promptSection(
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: nil,
+            settings: AppStyleSettings()
+        )
+        let requests = cleanupRequests(
+            dictationLanguage: "English",
+            appStylePrompt: style,
+            cleanupLevel: .light
+        ) { _ in "Synthetic cleaned text." }
+        TestSupport.expectEqual(requests.count, 1)
+        let prompt = requests[0].systemPrompt
+        TestSupport.expect(prompt.hasPrefix(PostProcessingService.defaultSystemPrompt), "Cleanup level must only append to the base prompt")
+        let levelRange = prompt.range(of: "Cleanup level: Light.")!
+        let styleRange = prompt.range(of: "Destination app style")!
+        TestSupport.expect(levelRange.lowerBound < styleRange.lowerBound, "Cleanup level must come before the app style")
+    }
+
+    // Regression: long multi-thought dictation came back as one paragraph
+    // because the prompt never asked for the line breaks a typist would add.
+    private static func testDefaultPromptAsksForParagraphBreaks() {
+        let prompt = PostProcessingService.defaultSystemPrompt
+        TestSupport.expect(prompt.contains("Paragraphs and line breaks:"), "Default prompt must have a paragraph section")
+        TestSupport.expect(prompt.contains("Line breaks and paragraph breaks are layout, not added content."), "Hard contract must allow line breaks")
+        TestSupport.expect(
+            prompt.contains("new workout routine.\n\n    I'm excited for tomorrow's workout"),
+            "Paragraph example must show a real blank line"
+        )
+        TestSupport.expect(!prompt.contains("\\n"), "Prompt must not show a literal backslash-n the model could copy")
+        TestSupport.expect(!prompt.contains("for short messages"), "Prompt must not frame every dictation as a short message")
     }
 
     private static let directive = "The dictation is primarily in Russian"
@@ -147,6 +182,7 @@ enum PostProcessingServiceTests {
         dictationLanguage: String,
         customVocabulary: String = "",
         appStylePrompt: String = "",
+        cleanupLevel: CleanupLevel = .medium,
         reply: @escaping @Sendable (String) -> String
     ) -> [CapturedRequest] {
         let recorder = RequestRecorder()
@@ -186,6 +222,7 @@ enum PostProcessingServiceTests {
                 context: context,
                 customVocabulary: customVocabulary,
                 appStylePrompt: appStylePrompt,
+                cleanupLevel: cleanupLevel,
                 dictationLanguage: dictationLanguage
             )
             done.signal()

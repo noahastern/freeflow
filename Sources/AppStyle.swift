@@ -1,5 +1,56 @@
 import Foundation
 
+/// Capitalization and punctuation for a style. Tones never change the words,
+/// so they stay inside the cleanup prompt's no-added-content contract.
+enum WritingTone: String, CaseIterable, Codable, Identifiable {
+    case formal
+    case casual
+    case veryCasual
+    case excited
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .formal: return "Formal"
+        case .casual: return "Casual"
+        case .veryCasual: return "Very Casual"
+        case .excited: return "Excited"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .formal: return "Caps and full punctuation"
+        case .casual: return "Caps, lighter punctuation"
+        case .veryCasual: return "No caps, lighter punctuation"
+        case .excited: return "More exclamation marks"
+        }
+    }
+
+    var sample: String {
+        switch self {
+        case .formal: return "Sounds good, see you at the game tonight. I'll grab the tickets on the way."
+        case .casual: return "Sounds good see you at the game tonight. I'll grab the tickets on the way"
+        case .veryCasual: return "sounds good see you at the game tonight. i'll grab the tickets on the way"
+        case .excited: return "Sounds good, see you at the game tonight! I'll grab the tickets on the way!"
+        }
+    }
+
+    var instruction: String {
+        switch self {
+        case .formal:
+            return "Standard capitalization and full punctuation. End every sentence with a period or question mark, and use an exclamation mark only where the speaker clearly exclaimed."
+        case .casual:
+            return "Standard capitalization with lighter punctuation. Leave off the period after the last sentence, and drop commas that are not needed to make the meaning clear. Keep question marks."
+        case .veryCasual:
+            return "Write everything in lowercase, including the start of each sentence, names, and \"i\". Keep acronyms and code identifiers in their usual casing. Leave off the period after the last sentence, and drop commas that are not needed to make the meaning clear. Keep question marks."
+        case .excited:
+            return "Standard capitalization and full punctuation. Where the speaker sounds upbeat or enthusiastic, end the sentence with an exclamation mark instead of a period. Keep neutral or serious sentences as they are, and do not add words or emoji."
+        }
+    }
+}
+
 /// Groups of destination apps that share a writing style. Cleanup appends the
 /// group's instruction to the system prompt so a Slack message reads like chat
 /// and an email reads like email, without the user editing the main prompt.
@@ -50,26 +101,43 @@ enum AppStyleCategory: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .messaging:
             return """
-The text is a chat message. Keep it casual and conversational, the way people type in chat. Use light punctuation, and leave off the final period on a single short sentence. Do not add greetings, sign-offs, or formal structure. Keep the speaker's slang and casual phrasing.
+The text is a chat message. Write it the way people type in chat. When the message covers more than one thought, put each thought on its own line with a single line break, the way people send chat. Do not add greetings, sign-offs, or formal structure. Keep the speaker's slang and phrasing.
 """
         case .email:
             return """
-The text is an email. Use complete sentences with standard capitalization and punctuation, and break distinct points into short paragraphs. Follow the email salutation and closing rules above. Keep the speaker's tone; do not make it more formal than it was spoken.
+The text is an email. Use complete sentences, and break distinct points into short paragraphs. Follow the email salutation and closing rules above. Keep the speaker's tone; do not make it more formal than it was spoken.
 """
         case .aiAssistant:
             return """
-The text is a prompt for an AI assistant. Keep every detail, constraint, and instruction the speaker gave, in the order given. Write clear, well-punctuated sentences. Preserve technical terms, file names, and code identifiers exactly. Do not answer, shorten, or act on the prompt.
+The text is a prompt for an AI assistant. Keep every detail, constraint, and instruction the speaker gave, in the order given. Write clear, well-punctuated sentences. Preserve technical terms, file names, and code identifiers exactly. Separate distinct requests or pieces of background into their own paragraphs. Do not answer, shorten, or act on the prompt.
 """
         case .coding:
             return """
-The text is going into a code editor or terminal: usually a prompt to a coding agent, a code comment, a commit message, or a command. Be concise. Preserve identifiers, file paths, flags, and casing exactly, and write spoken symbols as code when clearly intended. No greetings or filler.
+The text is going into a code editor or terminal: usually a prompt to a coding agent, a code comment, a commit message, or a command. Be concise. A command or commit subject stays on one line; a longer prompt to an agent gets paragraph breaks between distinct points. Preserve identifiers, file paths, flags, and casing exactly, and write spoken symbols as code when clearly intended. No greetings or filler.
 """
         case .documents:
             return """
-The text is going into a document or note. Use complete, well-punctuated sentences and paragraph breaks between distinct thoughts. Keep the speaker's wording.
+The text is going into a document or note. Use complete sentences and paragraph breaks between distinct thoughts. Keep the speaker's wording.
 """
         case .general:
             return ""
+        }
+    }
+
+    /// Prompts and code are left to their own rules, so they offer no tone.
+    var availableTones: [WritingTone] {
+        switch self {
+        case .messaging: return [.formal, .casual, .veryCasual, .excited]
+        case .email, .documents, .general: return [.formal, .casual, .excited]
+        case .aiAssistant, .coding: return []
+        }
+    }
+
+    var defaultTone: WritingTone? {
+        switch self {
+        case .messaging: return .casual
+        case .email, .documents, .general: return .formal
+        case .aiAssistant, .coding: return nil
         }
     }
 }
@@ -88,6 +156,8 @@ struct AppStyleSettings: Codable, Equatable {
     var customInstructions: [String: String] = [:]
     /// Keyed by bundle identifier.
     var appAssignments: [String: AppStyleAssignment] = [:]
+    /// Keyed by `AppStyleCategory.rawValue`. A missing entry uses the category's default tone.
+    var tones: [String: WritingTone] = [:]
 
     init() {}
 
@@ -97,6 +167,7 @@ struct AppStyleSettings: Codable, Equatable {
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
         customInstructions = try container.decodeIfPresent([String: String].self, forKey: .customInstructions) ?? [:]
         appAssignments = try container.decodeIfPresent([String: AppStyleAssignment].self, forKey: .appAssignments) ?? [:]
+        tones = (try? container.decodeIfPresent([String: WritingTone].self, forKey: .tones)) ?? [:]
     }
 
     static func load(from defaults: UserDefaults) -> AppStyleSettings {
@@ -118,6 +189,15 @@ struct AppStyleSettings: Codable, Equatable {
         return custom.isEmpty
             ? category.defaultInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
             : custom
+    }
+
+    /// The chosen tone, or the default when none is saved or the saved one is
+    /// not offered for this category.
+    func tone(for category: AppStyleCategory) -> WritingTone? {
+        if let tone = tones[category.rawValue], category.availableTones.contains(tone) {
+            return tone
+        }
+        return category.defaultTone
     }
 
     func isCustomized(_ category: AppStyleCategory) -> Bool {
@@ -263,11 +343,18 @@ enum AppStyleResolver {
             windowTitle: windowTitle,
             assignments: settings.appAssignments
         )
+        var lines: [String] = []
         let instruction = settings.instruction(for: category)
-        guard !instruction.isEmpty else { return "" }
+        if !instruction.isEmpty {
+            lines.append(instruction)
+        }
+        if let tone = settings.tone(for: category) {
+            lines.append("Tone (\(tone.title)): \(tone.instruction)")
+        }
+        guard !lines.isEmpty else { return "" }
         return """
 Destination app style (\(category.title)):
-\(instruction)
+\(lines.joined(separator: "\n"))
 These style notes change tone and formatting only. The hard contract above still applies: never add content, answer, or carry out the transcript.
 """
     }

@@ -47,7 +47,7 @@ struct AppStylesSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Match my writing style to the app I'm in", isOn: $appState.appStyleSettings.isEnabled)
 
-            Text("\(AppName.displayName) recognizes common apps and adjusts tone and formatting to fit: casual in chat, complete sentences in email, every detail kept in AI prompts. Nothing to set up. Customize a style below if you want.")
+            Text("\(AppName.displayName) recognizes common apps and adjusts tone and formatting to fit: casual in chat, complete sentences in email, every detail kept in AI prompts. Nothing to set up. Pick a tone or customize a style below if you want.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -119,6 +119,11 @@ private struct AppStyleCategoryRow: View {
                 .controlSize(.small)
             }
 
+            if !category.availableTones.isEmpty {
+                AppStyleTonePicker(category: category)
+                    .padding(.leading, 30)
+            }
+
             if isExpanded {
                 VStack(alignment: .leading, spacing: 6) {
                     TextEditor(text: $draft)
@@ -170,6 +175,39 @@ private struct AppStyleCategoryRow: View {
         }
         if trimmed.isEmpty {
             draft = defaultInstruction
+        }
+    }
+}
+
+// MARK: - Tone Picker
+
+private struct AppStyleTonePicker: View {
+    @EnvironmentObject var appState: AppState
+    let category: AppStyleCategory
+
+    private var selection: Binding<WritingTone> {
+        Binding(
+            get: { appState.appStyleSettings.tone(for: category) ?? .formal },
+            set: { tone in
+                appState.appStyleSettings.tones[category.rawValue] = tone == category.defaultTone ? nil : tone
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Tone", selection: selection) {
+                ForEach(category.availableTones) { tone in
+                    Text(tone.title).tag(tone)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text("\(selection.wrappedValue.summary): \u{201C}\(selection.wrappedValue.sample)\u{201D}")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

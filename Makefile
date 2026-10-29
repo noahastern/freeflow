@@ -20,11 +20,13 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/AppContextService.swift \
 	Sources/AppName.swift \
 	Sources/AppStyle.swift \
+	Sources/CleanupLevel.swift \
 	Sources/AppTextInsertionCore.swift \
 	Sources/AppTextInsertionTarget.swift \
 	Sources/ContextInferenceFailure.swift \
 	Sources/LLMAPITransport.swift \
 	Sources/LLMCooldownManager.swift \
+	Sources/MicrophoneReadinessPreference.swift \
 	Sources/ModelConfiguration.swift \
 	Sources/OriginalFieldInsertionPreference.swift \
 	Sources/PostProcessingService.swift \

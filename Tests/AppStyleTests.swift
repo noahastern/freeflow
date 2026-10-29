@@ -8,6 +8,68 @@ enum AppStyleTests {
         testPromptSection()
         testCustomInstructions()
         testSettingsPersistence()
+        testStylesDescribeLineBreaks()
+        testTones()
+        testTonePersistence()
+    }
+
+    private static func testTones() {
+        var settings = AppStyleSettings()
+        TestSupport.expectEqual(settings.tone(for: .messaging), .casual)
+        TestSupport.expectEqual(settings.tone(for: .email), .formal)
+        TestSupport.expectEqual(settings.tone(for: .coding), nil)
+        TestSupport.expectEqual(settings.tone(for: .aiAssistant), nil)
+
+        settings.tones[AppStyleCategory.messaging.rawValue] = .veryCasual
+        TestSupport.expectEqual(settings.tone(for: .messaging), .veryCasual)
+        let chat = AppStyleResolver.promptSection(bundleIdentifier: "com.hnc.Discord", windowTitle: nil, settings: settings)
+        TestSupport.expect(chat.contains("Tone (Very Casual): Write everything in lowercase"), "Chosen tone must reach the prompt")
+        TestSupport.expect(chat.contains("never add content"), "Tone must keep the hard contract reminder")
+
+        // Very Casual is not offered for email, so a stale value falls back to the default.
+        settings.tones[AppStyleCategory.email.rawValue] = .veryCasual
+        TestSupport.expectEqual(settings.tone(for: .email), .formal)
+
+        let code = AppStyleResolver.promptSection(bundleIdentifier: "com.apple.Terminal", windowTitle: nil, settings: settings)
+        TestSupport.expect(!code.contains("Tone ("), "Code gets no tone")
+
+        for category in AppStyleCategory.allCases {
+            if let tone = category.defaultTone {
+                TestSupport.expect(category.availableTones.contains(tone), "\(category) default tone must be offered")
+            }
+        }
+        for tone in WritingTone.allCases {
+            TestSupport.expect(!tone.instruction.contains("\\n"), "\(tone) must not show a literal backslash-n")
+        }
+    }
+
+    private static func testTonePersistence() {
+        let suite = "FreeFlowTests.AppStyleTone.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var settings = AppStyleSettings()
+        settings.tones[AppStyleCategory.email.rawValue] = .excited
+        settings.save(to: defaults)
+        TestSupport.expectEqual(AppStyleSettings.load(from: defaults), settings)
+
+        // Settings saved before tones existed still load.
+        defaults.set(Data(#"{"isEnabled":false}"#.utf8), forKey: AppStyleSettings.storageKey)
+        let older = AppStyleSettings.load(from: defaults)
+        TestSupport.expect(!older.isEnabled, "Older settings keep their values")
+        TestSupport.expectEqual(older.tones, [:])
+
+        // An unknown tone drops the tones, not the rest of the settings.
+        defaults.set(Data(#"{"isEnabled":false,"tones":{"email":"synthetic-unknown"}}"#.utf8), forKey: AppStyleSettings.storageKey)
+        let unknown = AppStyleSettings.load(from: defaults)
+        TestSupport.expect(!unknown.isEnabled, "Unknown tone must not reset settings")
+        TestSupport.expectEqual(unknown.tones, [:])
+    }
+
+    private static func testStylesDescribeLineBreaks() {
+        TestSupport.expect(AppStyleCategory.messaging.defaultInstruction.contains("single line break"), "Chat puts separate thoughts on separate lines")
+        TestSupport.expect(AppStyleCategory.aiAssistant.defaultInstruction.contains("own paragraphs"), "Prompts separate distinct requests")
+        TestSupport.expect(AppStyleCategory.coding.defaultInstruction.contains("stays on one line"), "Commands stay on one line")
     }
 
     private static func testKnownAppsResolve() {
@@ -48,10 +110,8 @@ enum AppStyleTests {
         TestSupport.expect(section.contains(AppStyleCategory.email.defaultInstruction.trimmingCharacters(in: .whitespacesAndNewlines)), "Section must include the default instruction")
         TestSupport.expect(section.contains("never add content"), "Section must restate the hard contract")
 
-        TestSupport.expectEqual(
-            AppStyleResolver.promptSection(bundleIdentifier: "com.example.unknown", windowTitle: nil, settings: AppStyleSettings()),
-            ""
-        )
+        let general = AppStyleResolver.promptSection(bundleIdentifier: "com.example.unknown", windowTitle: nil, settings: AppStyleSettings())
+        TestSupport.expect(general.hasPrefix("Destination app style (Everything Else):\nTone (Formal):"), "Everything Else gets only its tone")
 
         var disabled = AppStyleSettings()
         disabled.isEnabled = false

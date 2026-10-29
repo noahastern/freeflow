@@ -1279,15 +1279,17 @@ struct GeneralSettingsView: View {
 
     private var cleanupSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle("Preserve exact wording", isOn: $appState.preserveExactWording)
+            Picker("Cleanup level", selection: $appState.cleanupLevel) {
+                ForEach(CleanupLevel.allCases) { level in
+                    Text(level.title).tag(level)
+                }
+            }
+            .pickerStyle(.segmented)
 
-            Text("When on, \(AppName.displayName) skips the LLM cleanup step and pastes the transcript verbatim — filler words, informal phrasing, and explicit language are all preserved. Voice macros and Edit Mode still run.")
+            Text(appState.cleanupLevel.summary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-
-            Text("If Output Language is set, the transcript is still translated into that language, but the translation is literal: no rewording, no filler removal, no reformatting.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1355,9 +1357,36 @@ struct GeneralSettingsView: View {
                     )
                 }
             }
+
+            Divider()
+                .padding(.vertical, 2)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Keep microphone ready", selection: $appState.microphoneReadiness) {
+                    ForEach(MicrophoneReadiness.allCases) { readiness in
+                        Text(readiness.title).tag(readiness)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(microphoneReadinessDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .onAppear {
             appState.refreshAvailableMicrophones()
+        }
+    }
+
+    private var microphoneReadinessDescription: String {
+        switch appState.microphoneReadiness {
+        case .off:
+            return "The microphone opens when you press the shortcut, which can take a moment before recording starts."
+        case .afterUse:
+            return "The microphone stays open for 5 minutes after each dictation so the next one starts instantly. macOS shows the microphone indicator while it is open. Audio is ignored until you press the shortcut."
+        case .always:
+            return "The microphone stays open while \(AppName.displayName) runs so recording starts instantly. macOS shows the microphone indicator the whole time, and Bluetooth headsets may stay in lower-quality call mode. Audio is ignored until you press the shortcut."
         }
     }
 
