@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 // MARK: - Shared Helpers
 
-private struct SettingsCard<Content: View>: View {
+struct SettingsCard<Content: View>: View {
     let title: String
     let icon: String
     let content: Content
@@ -436,6 +436,10 @@ struct SettingsView: View {
                 switch appState.selectedSettingsTab {
                 case .general, .none:
                     GeneralSettingsView()
+                case .vocabulary:
+                    VocabularySettingsView()
+                case .appStyles:
+                    AppStylesSettingsView()
                 case .prompts:
                     PromptsSettingsView()
                 case .macros:
@@ -532,8 +536,6 @@ struct GeneralSettingsView: View {
     @State private var isValidatingKey = false
     @State private var keyValidationError: String?
     @State private var successfulAPIConfiguration: ValidatedAPIConfiguration?
-    @State private var customVocabularyInput: String = ""
-    @FocusState private var customVocabularyFocused: Bool
     @State private var micPermissionGranted = false
     @State private var showMutedHint = false
     @State private var availableSoundNames: [String] = []
@@ -737,9 +739,6 @@ struct GeneralSettingsView: View {
                 SettingsCard("Sound Volume", icon: "speaker.wave.2.fill") {
                     soundVolumeSection
                 }
-                SettingsCard("Custom Vocabulary", icon: "text.book.closed.fill") {
-                    vocabularySection
-                }
                 SettingsCard("Permissions", icon: "lock.shield.fill") {
                     permissionsSection
                 }
@@ -754,14 +753,12 @@ struct GeneralSettingsView: View {
             isValidatingKey = false
             keyValidationError = nil
             successfulAPIConfiguration = nil
-            customVocabularyInput = appState.customVocabulary
             checkMicPermission()
             appState.refreshLaunchAtLoginStatus()
             Task { await githubCache.fetchIfNeeded() }
         }
         .onDisappear {
             apiDraft.dismiss()
-            commitCustomVocabulary()
         }
         .onChange(of: appState.committedAPIConfiguration) { saved in
             apiDraft.reconcile(saved)
@@ -1405,7 +1402,7 @@ struct GeneralSettingsView: View {
             }
         }
         .onAppear {
-            availableSoundNames = AlertSoundLibrary.soundNames()
+            availableSoundNames = AlertSoundLibrary.pickerSoundNames()
         }
         .onChange(of: appState.alertSoundsEnabled) { enabled in
             if !enabled { showMutedHint = false }
@@ -1470,39 +1467,6 @@ struct GeneralSettingsView: View {
         panel.message = "Choose a sound file"
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url.path
-    }
-
-    // MARK: Custom Vocabulary
-
-    private func commitCustomVocabulary() {
-        let trimmed = customVocabularyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        if appState.customVocabulary != trimmed {
-            appState.customVocabulary = trimmed
-        }
-    }
-
-    private var vocabularySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Words and phrases to preserve during post-processing.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            TextEditor(text: $customVocabularyInput)
-                .font(.system(.body, design: .monospaced))
-                .frame(minHeight: 80, maxHeight: 140)
-                .focused($customVocabularyFocused)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
-                )
-                .onChange(of: customVocabularyFocused) { focused in
-                    if !focused { commitCustomVocabulary() }
-                }
-
-            Text("Separate entries with commas, new lines, or semicolons.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
 
     // MARK: Permissions

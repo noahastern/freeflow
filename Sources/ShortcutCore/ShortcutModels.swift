@@ -64,6 +64,14 @@ enum ShortcutRole {
         case .copyAgain: return "Paste Again"
         }
     }
+
+    var subtitle: String {
+        switch self {
+        case .hold: return "Hold while speaking, release to stop."
+        case .toggle: return "Tap to start, tap again to stop."
+        case .copyAgain: return "Paste your last transcript again."
+        }
+    }
 }
 
 enum ShortcutEvent: Equatable {

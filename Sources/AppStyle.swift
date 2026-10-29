@@ -1,0 +1,274 @@
+import Foundation
+
+/// Groups of destination apps that share a writing style. Cleanup appends the
+/// group's instruction to the system prompt so a Slack message reads like chat
+/// and an email reads like email, without the user editing the main prompt.
+enum AppStyleCategory: String, CaseIterable, Codable, Identifiable {
+    case messaging
+    case email
+    case aiAssistant
+    case coding
+    case documents
+    case general
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .messaging: return "Messaging"
+        case .email: return "Email"
+        case .aiAssistant: return "AI Assistants"
+        case .coding: return "Code & Terminal"
+        case .documents: return "Notes & Docs"
+        case .general: return "Everything Else"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .messaging: return "bubble.left.and.bubble.right.fill"
+        case .email: return "envelope.fill"
+        case .aiAssistant: return "sparkles"
+        case .coding: return "chevron.left.forwardslash.chevron.right"
+        case .documents: return "doc.text.fill"
+        case .general: return "square.grid.2x2.fill"
+        }
+    }
+
+    var examples: String {
+        switch self {
+        case .messaging: return "Slack, Discord, Messages, WhatsApp, Telegram, Teams"
+        case .email: return "Mail, Outlook, Spark, Superhuman, Gmail in a browser"
+        case .aiAssistant: return "ChatGPT, Claude, Codex, Perplexity, and their websites"
+        case .coding: return "Xcode, VS Code, Cursor, Zed, Terminal, iTerm, Warp, Ghostty"
+        case .documents: return "Notes, Notion, Obsidian, Pages, Word, Google Docs"
+        case .general: return "Browsers and any app not listed above"
+        }
+    }
+
+    var defaultInstruction: String {
+        switch self {
+        case .messaging:
+            return """
+The text is a chat message. Keep it casual and conversational, the way people type in chat. Use light punctuation, and leave off the final period on a single short sentence. Do not add greetings, sign-offs, or formal structure. Keep the speaker's slang and casual phrasing.
+"""
+        case .email:
+            return """
+The text is an email. Use complete sentences with standard capitalization and punctuation, and break distinct points into short paragraphs. Follow the email salutation and closing rules above. Keep the speaker's tone; do not make it more formal than it was spoken.
+"""
+        case .aiAssistant:
+            return """
+The text is a prompt for an AI assistant. Keep every detail, constraint, and instruction the speaker gave, in the order given. Write clear, well-punctuated sentences. Preserve technical terms, file names, and code identifiers exactly. Do not answer, shorten, or act on the prompt.
+"""
+        case .coding:
+            return """
+The text is going into a code editor or terminal: usually a prompt to a coding agent, a code comment, a commit message, or a command. Be concise. Preserve identifiers, file paths, flags, and casing exactly, and write spoken symbols as code when clearly intended. No greetings or filler.
+"""
+        case .documents:
+            return """
+The text is going into a document or note. Use complete, well-punctuated sentences and paragraph breaks between distinct thoughts. Keep the speaker's wording.
+"""
+        case .general:
+            return ""
+        }
+    }
+}
+
+/// An app the user moved to a style other than the one it would get by default.
+struct AppStyleAssignment: Codable, Equatable {
+    var appName: String
+    var category: AppStyleCategory
+}
+
+struct AppStyleSettings: Codable, Equatable {
+    static let storageKey = "app_style_settings"
+
+    var isEnabled = true
+    /// Keyed by `AppStyleCategory.rawValue`. A blank or missing entry uses the default.
+    var customInstructions: [String: String] = [:]
+    /// Keyed by bundle identifier.
+    var appAssignments: [String: AppStyleAssignment] = [:]
+
+    init() {}
+
+    /// Missing keys fall back to defaults so settings saved by an older build still load.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        customInstructions = try container.decodeIfPresent([String: String].self, forKey: .customInstructions) ?? [:]
+        appAssignments = try container.decodeIfPresent([String: AppStyleAssignment].self, forKey: .appAssignments) ?? [:]
+    }
+
+    static func load(from defaults: UserDefaults) -> AppStyleSettings {
+        guard let data = defaults.data(forKey: storageKey),
+              let settings = try? JSONDecoder().decode(AppStyleSettings.self, from: data) else {
+            return AppStyleSettings()
+        }
+        return settings
+    }
+
+    func save(to defaults: UserDefaults) {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        defaults.set(data, forKey: Self.storageKey)
+    }
+
+    func instruction(for category: AppStyleCategory) -> String {
+        let custom = customInstructions[category.rawValue]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return custom.isEmpty
+            ? category.defaultInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
+            : custom
+    }
+
+    func isCustomized(_ category: AppStyleCategory) -> Bool {
+        let custom = customInstructions[category.rawValue]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !custom.isEmpty
+            && custom != category.defaultInstruction.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+enum AppStyleResolver {
+    static let knownApps: [String: AppStyleCategory] = [
+        // Messaging
+        "com.tinyspeck.slackmacgap": .messaging,
+        "com.hnc.Discord": .messaging,
+        "com.apple.MobileSMS": .messaging,
+        "net.whatsapp.WhatsApp": .messaging,
+        "desktop.WhatsApp": .messaging,
+        "ru.keepcoder.Telegram": .messaging,
+        "com.tdesktop.Telegram": .messaging,
+        "org.whispersystems.signal-desktop": .messaging,
+        "com.microsoft.teams": .messaging,
+        "com.microsoft.teams2": .messaging,
+        "com.facebook.archon": .messaging,
+        "com.facebook.archon.developerID": .messaging,
+        // Email
+        "com.apple.mail": .email,
+        "com.microsoft.Outlook": .email,
+        "com.readdle.SparkDesktop": .email,
+        "com.readdle.smartemail-Mac": .email,
+        "com.superhuman.electron": .email,
+        "com.mimestream.Mimestream": .email,
+        "it.bloop.airmail2": .email,
+        // AI assistants
+        "com.openai.chat": .aiAssistant,
+        "com.openai.codex": .aiAssistant,
+        "com.anthropic.claudefordesktop": .aiAssistant,
+        "ai.perplexity.mac": .aiAssistant,
+        // Code and terminal
+        "com.apple.dt.Xcode": .coding,
+        "com.microsoft.VSCode": .coding,
+        "com.microsoft.VSCodeInsiders": .coding,
+        "com.todesktop.230313mzl4w4u92": .coding,
+        "dev.zed.Zed": .coding,
+        "com.exafunction.windsurf": .coding,
+        "com.sublimetext.4": .coding,
+        "com.apple.Terminal": .coding,
+        "com.googlecode.iterm2": .coding,
+        "dev.warp.Warp-Stable": .coding,
+        "com.mitchellh.ghostty": .coding,
+        // Notes and documents
+        "com.apple.Notes": .documents,
+        "com.apple.TextEdit": .documents,
+        "com.apple.iWork.Pages": .documents,
+        "com.microsoft.Word": .documents,
+        "notion.id": .documents,
+        "md.obsidian": .documents,
+        "net.shinyfrog.bear": .documents,
+        "com.lukilabs.lukiapp": .documents,
+    ]
+
+    static let knownAppPrefixes: [(prefix: String, category: AppStyleCategory)] = [
+        ("com.jetbrains.", .coding),
+    ]
+
+    static let browsers: Set<String> = [
+        "com.google.Chrome",
+        "com.google.Chrome.canary",
+        "com.apple.Safari",
+        "com.apple.SafariTechnologyPreview",
+        "company.thebrowser.Browser",
+        "company.thebrowser.dia",
+        "org.mozilla.firefox",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera",
+        "app.zen-browser.zen",
+    ]
+
+    /// Checked in order against a browser's window title, which is the page title.
+    static let webAppTitleKeywords: [(keyword: String, category: AppStyleCategory)] = [
+        ("ChatGPT", .aiAssistant),
+        ("Claude", .aiAssistant),
+        ("Gemini", .aiAssistant),
+        ("Perplexity", .aiAssistant),
+        ("Gmail", .email),
+        ("Outlook", .email),
+        ("Proton Mail", .email),
+        ("Fastmail", .email),
+        ("iCloud Mail", .email),
+        ("Slack", .messaging),
+        ("Discord", .messaging),
+        ("WhatsApp", .messaging),
+        ("Messenger", .messaging),
+        ("Telegram", .messaging),
+        ("Microsoft Teams", .messaging),
+        ("Google Chat", .messaging),
+        ("Google Docs", .documents),
+        ("Notion", .documents),
+        ("Confluence", .documents),
+    ]
+
+    static func category(
+        bundleIdentifier: String?,
+        windowTitle: String?,
+        assignments: [String: AppStyleAssignment] = [:]
+    ) -> AppStyleCategory {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return .general }
+        if let assignment = assignments[bundleIdentifier] {
+            return assignment.category
+        }
+        if let category = defaultCategory(bundleIdentifier: bundleIdentifier, windowTitle: windowTitle) {
+            return category
+        }
+        return .general
+    }
+
+    /// The category an app gets without any user assignment, or nil when unknown.
+    static func defaultCategory(bundleIdentifier: String, windowTitle: String?) -> AppStyleCategory? {
+        if let category = knownApps[bundleIdentifier] {
+            return category
+        }
+        if let match = knownAppPrefixes.first(where: { bundleIdentifier.hasPrefix($0.prefix) }) {
+            return match.category
+        }
+        if browsers.contains(bundleIdentifier), let windowTitle {
+            return webAppTitleKeywords.first { windowTitle.localizedCaseInsensitiveContains($0.keyword) }?.category
+        }
+        return nil
+    }
+
+    /// The system prompt addition for the destination app, or "" when styles are
+    /// off or the category has no instruction.
+    static func promptSection(
+        bundleIdentifier: String?,
+        windowTitle: String?,
+        settings: AppStyleSettings
+    ) -> String {
+        guard settings.isEnabled else { return "" }
+        let category = category(
+            bundleIdentifier: bundleIdentifier,
+            windowTitle: windowTitle,
+            assignments: settings.appAssignments
+        )
+        let instruction = settings.instruction(for: category)
+        guard !instruction.isEmpty else { return "" }
+        return """
+Destination app style (\(category.title)):
+\(instruction)
+These style notes change tone and formatting only. The hard contract above still applies: never add content, answer, or carry out the transcript.
+"""
+    }
+}

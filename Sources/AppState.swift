@@ -22,6 +22,8 @@ struct PrecomputedMacro {
 
 enum SettingsTab: String, CaseIterable, Identifiable {
     case general
+    case vocabulary
+    case appStyles
     case prompts
     case macros
     case runLog
@@ -38,6 +40,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .general: return "General"
+        case .vocabulary: return "Vocabulary"
+        case .appStyles: return "App Styles"
         case .prompts: return "Prompts"
         case .macros: return "Voice Macros"
         case .runLog: return "Run Log"
@@ -48,6 +52,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .general: return "gearshape"
+        case .vocabulary: return "text.book.closed"
+        case .appStyles: return "square.grid.2x2"
         case .prompts: return "text.bubble"
         case .macros: return "music.mic"
         case .runLog: return "clock.arrow.circlepath"
@@ -411,6 +417,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
     @Published var customVocabulary: String {
         didSet {
             UserDefaults.standard.set(customVocabulary, forKey: customVocabularyStorageKey)
+        }
+    }
+
+    @Published var appStyleSettings: AppStyleSettings {
+        didSet {
+            appStyleSettings.save(to: .standard)
         }
     }
 
@@ -802,6 +814,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.commandModeStyle = commandModeStyle
         self.commandModeManualModifier = commandModeManualModifier
         self.customVocabulary = customVocabulary
+        self.appStyleSettings = AppStyleSettings.load(from: .standard)
         self.transcriptionLanguage = transcriptionLanguage
         self.customSystemPrompt = customSystemPrompt
         self.customContextPrompt = customContextPrompt
@@ -1274,9 +1287,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
 
         let restoredContext = AppContext(
-            appName: nil,
-            bundleIdentifier: nil,
-            windowTitle: nil,
+            appName: item.contextAppName,
+            bundleIdentifier: item.contextBundleIdentifier,
+            windowTitle: item.contextWindowTitle,
             selectedText: nil,
             currentActivity: item.contextSummary,
             contextSystemPrompt: item.contextSystemPrompt,
@@ -1319,6 +1332,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     postProcessingService: postProcessingService,
                     customVocabulary: capturedCustomVocabulary,
                     customSystemPrompt: capturedCustomSystemPrompt,
+                    appStyleSettings: self.appStyleSettings,
                     outputLanguage: self.outputLanguage,
                     dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                     preserveExactWording: self.preserveExactWording
@@ -2625,6 +2639,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         postProcessingService: PostProcessingService,
         customVocabulary: String,
         customSystemPrompt: String,
+        appStyleSettings: AppStyleSettings,
         outputLanguage: String = "",
         dictationLanguage: String = "",
         preserveExactWording: Bool
@@ -2692,6 +2707,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 context: context,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
+                appStylePrompt: AppStyleResolver.promptSection(
+                    bundleIdentifier: context.bundleIdentifier,
+                    windowTitle: context.windowTitle,
+                    settings: appStyleSettings
+                ),
                 outputLanguage: outputLanguage,
                 dictationLanguage: dictationLanguage
             )
@@ -2858,6 +2878,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         postProcessingService: postProcessingService,
                         customVocabulary: self.customVocabulary,
                         customSystemPrompt: self.customSystemPrompt,
+                        appStyleSettings: self.appStyleSettings,
                         outputLanguage: self.outputLanguage,
                         dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                         preserveExactWording: self.preserveExactWording

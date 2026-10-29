@@ -8,6 +8,7 @@ enum PostProcessingServiceTests {
         testCustomPromptKeepsDirective()
         testFallbackModelReceivesSameDirective()
         testEnglishRequestIsUnchanged()
+        testAppStyleAndVocabularyReachRequest()
     }
 
     private static let directive = "The dictation is primarily in Russian"
@@ -82,11 +83,37 @@ enum PostProcessingServiceTests {
         TestSupport.expectEqual(requests.map(\.systemPrompt), [PostProcessingService.defaultSystemPrompt])
     }
 
+    private static func testAppStyleAndVocabularyReachRequest() {
+        let style = AppStyleResolver.promptSection(
+            bundleIdentifier: "com.tinyspeck.slackmacgap",
+            windowTitle: nil,
+            settings: AppStyleSettings()
+        )
+        let requests = cleanupRequests(
+            dictationLanguage: "English",
+            customVocabulary: "Groq, Nsight",
+            appStylePrompt: style
+        ) { _ in "Synthetic cleaned text." }
+        TestSupport.expectEqual(requests.count, 1)
+        let request = requests[0]
+        TestSupport.expect(request.systemPrompt.hasPrefix(PostProcessingService.defaultSystemPrompt), "App style must only append to the base prompt")
+        TestSupport.expect(request.systemPrompt.contains("Destination app style (Messaging)"), "App style must reach the system prompt")
+        TestSupport.expect(request.systemPrompt.contains("Personal dictionary"), "Vocabulary must reach the system prompt")
+        let styleRange = request.systemPrompt.range(of: "Destination app style")!
+        let vocabularyRange = request.systemPrompt.range(of: "Personal dictionary")!
+        TestSupport.expect(styleRange.lowerBound < vocabularyRange.lowerBound, "Vocabulary must come after the app style, closest to the transcript")
+        TestSupport.expect(
+            request.userMessage.contains("PERSONAL_DICTIONARY (write sound-alike words with these exact spellings): Groq, Nsight"),
+            "Vocabulary reminder must sit next to the transcript"
+        )
+    }
+
     // MARK: - Request capture
 
     private struct CapturedRequest {
         let model: String
         let systemPrompt: String
+        let userMessage: String
     }
 
     private final class RequestRecorder: @unchecked Sendable {
@@ -106,9 +133,11 @@ enum PostProcessingServiceTests {
                 let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] ?? [:]
                 let messages = json["messages"] as? [[String: Any]] ?? []
                 let system = messages.first { $0["role"] as? String == "system" }
+                let user = messages.first { $0["role"] as? String == "user" }
                 return CapturedRequest(
                     model: json["model"] as? String ?? "",
-                    systemPrompt: system?["content"] as? String ?? ""
+                    systemPrompt: system?["content"] as? String ?? "",
+                    userMessage: user?["content"] as? String ?? ""
                 )
             }
         }
@@ -116,6 +145,8 @@ enum PostProcessingServiceTests {
 
     private static func cleanupRequests(
         dictationLanguage: String,
+        customVocabulary: String = "",
+        appStylePrompt: String = "",
         reply: @escaping @Sendable (String) -> String
     ) -> [CapturedRequest] {
         let recorder = RequestRecorder()
@@ -153,7 +184,8 @@ enum PostProcessingServiceTests {
             _ = try? await service.postProcess(
                 transcript: "synthetic transcript",
                 context: context,
-                customVocabulary: "",
+                customVocabulary: customVocabulary,
+                appStylePrompt: appStylePrompt,
                 dictationLanguage: dictationLanguage
             )
             done.signal()

@@ -6,8 +6,8 @@ enum AlertSoundPreferenceTests {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        TestSupport.expectEqual(AlertSoundSlot.start.load(from: defaults), "Tink")
-        TestSupport.expectEqual(AlertSoundSlot.stop.load(from: defaults), "Pop")
+        TestSupport.expectEqual(AlertSoundSlot.start.load(from: defaults), "freeflow-start")
+        TestSupport.expectEqual(AlertSoundSlot.stop.load(from: defaults), "freeflow-stop")
         TestSupport.expect(defaults.object(forKey: AlertSoundSlot.start.storageKey) == nil, "Loading the default must not persist a choice")
 
         defaults.set("Glass", forKey: AlertSoundSlot.start.storageKey)
@@ -16,12 +16,13 @@ enum AlertSoundPreferenceTests {
         TestSupport.expectEqual(AlertSoundSlot.stop.load(from: defaults), "/tmp/Example Sound.wav")
 
         defaults.set("  ", forKey: AlertSoundSlot.start.storageKey)
-        TestSupport.expectEqual(AlertSoundSlot.start.load(from: defaults), "Tink")
+        TestSupport.expectEqual(AlertSoundSlot.start.load(from: defaults), "freeflow-start")
 
         TestSupport.expect(AlertSoundLibrary.isFilePath("/tmp/a.wav"), "Absolute paths are files")
         TestSupport.expect(!AlertSoundLibrary.isFilePath("Pop"), "Bare names are named sounds")
         TestSupport.expectEqual(AlertSoundLibrary.displayName(for: "/tmp/Example Sound.wav"), "Example Sound")
         TestSupport.expectEqual(AlertSoundLibrary.displayName(for: "Pop"), "Pop")
+        TestSupport.expectEqual(AlertSoundLibrary.displayName(for: "freeflow-start"), "FreeFlow Start")
 
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory.appendingPathComponent("FreeFlowTests-\(UUID().uuidString)")
@@ -40,6 +41,10 @@ enum AlertSoundPreferenceTests {
         TestSupport.expectEqual(
             AlertSoundLibrary.soundNames(in: [first, second, missing], fileManager: fileManager),
             ["Alpha", "beta"]
+        )
+        TestSupport.expectEqual(
+            AlertSoundLibrary.pickerSoundNames(in: [first, second, missing], fileManager: fileManager),
+            ["freeflow-start", "freeflow-stop", "Alpha", "beta"]
         )
     }
 }

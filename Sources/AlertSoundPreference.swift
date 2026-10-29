@@ -1,7 +1,8 @@
 import Foundation
 
-/// A saved sound choice is either a named macOS sound (e.g. "Tink") or an
-/// absolute path to an audio file the user picked.
+/// A saved sound choice is a sound bundled with the app (e.g. "freeflow-start"),
+/// a named macOS sound (e.g. "Tink"), or an absolute path to an audio file the
+/// user picked. NSSound(named:) resolves bundled and macOS sounds alike.
 enum AlertSoundSlot: String, CaseIterable {
     case start
     case stop
@@ -10,8 +11,8 @@ enum AlertSoundSlot: String, CaseIterable {
 
     var defaultChoice: String {
         switch self {
-        case .start: return "Tink"
-        case .stop: return "Pop"
+        case .start: return AlertSoundLibrary.bundledStartSound
+        case .stop: return AlertSoundLibrary.bundledStopSound
         }
     }
 
@@ -32,6 +33,15 @@ enum AlertSoundSlot: String, CaseIterable {
 }
 
 enum AlertSoundLibrary {
+    static let bundledStartSound = "freeflow-start"
+    static let bundledStopSound = "freeflow-stop"
+
+    /// Sounds shipped in the app's Resources folder, listed ahead of macOS sounds.
+    static let bundledSounds: [(name: String, title: String)] = [
+        (bundledStartSound, "FreeFlow Start"),
+        (bundledStopSound, "FreeFlow Stop"),
+    ]
+
     static let audioFileExtensions: Set<String> = ["aiff", "aif", "aifc", "wav", "caf", "mp3", "m4a"]
 
     /// Same folders NSSound(named:) searches, user folder first.
@@ -50,6 +60,9 @@ enum AlertSoundLibrary {
     }
 
     static func displayName(for choice: String) -> String {
+        if let bundled = bundledSounds.first(where: { $0.name == choice }) {
+            return bundled.title
+        }
         guard isFilePath(choice) else { return choice }
         return URL(fileURLWithPath: choice).deletingPathExtension().lastPathComponent
     }
@@ -71,5 +84,16 @@ enum AlertSoundLibrary {
             }
         }
         return names.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Bundled sounds first, then everything NSSound(named:) finds on the system.
+    static func pickerSoundNames(
+        in directories: [URL] = standardSoundDirectories,
+        fileManager: FileManager = .default
+    ) -> [String] {
+        let bundledNames = bundledSounds.map(\.name)
+        let systemNames = soundNames(in: directories, fileManager: fileManager)
+            .filter { !bundledNames.contains($0) }
+        return bundledNames + systemNames
     }
 }

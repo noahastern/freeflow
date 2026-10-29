@@ -4,6 +4,7 @@ import Foundation
 struct FreeFlowTests {
     static func main() async {
         AlertSoundPreferenceTests.run()
+        AppStyleTests.run()
         AppContextServiceTests.run()
         await LLMAPITransportTests.run()
         TemperatureCapabilityCacheTests.run()
