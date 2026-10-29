@@ -120,6 +120,25 @@ final class RealtimeTranscriptionService {
         send(message, over: currentTask)
     }
 
+    /// Whether any event has arrived from the server on this socket.
+    var hasReceivedServerEvent: Bool {
+        stateQueue.sync { serverEventCount > 0 }
+    }
+
+    /// Wait up to `timeout` for the server's first event. False means the
+    /// server was never reached: nothing arrived before the deadline, the
+    /// socket closed, or the wait was cancelled.
+    func waitForServerEvent(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !Task.isCancelled {
+            let (heard, isClosed) = stateQueue.sync { (serverEventCount > 0, closed) }
+            if heard { return true }
+            if isClosed || Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        return false
+    }
+
     /// Signal end-of-input, wait for the final transcript, return it.
     func commitAndAwaitFinal() async throws -> String {
         let currentTask: URLSessionWebSocketTask? = stateQueue.sync {
