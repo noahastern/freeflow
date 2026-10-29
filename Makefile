@@ -55,7 +55,7 @@ ICON_SOURCE = Resources/AppIcon-Source.png
 ICON_ICNS = Resources/AppIcon.icns
 endif
 
-.PHONY: all check clean run icon dmg codesign-dmg notarize test typecheck validate
+.PHONY: all check clean run icon dmg codesign-dmg notarize test typecheck validate install-local
 
 all: $(APP_EXECUTABLE_TARGET)
 
@@ -187,3 +187,23 @@ clean:
 
 run: all
 	open "$(APP_BUNDLE)"
+
+# Personal build that replaces the installed FreeFlow.app in place. It keeps the
+# production name and bundle ID so existing settings carry over, stamps the
+# latest release version so the updater doesn't offer the same release, and
+# leaves no second copy in build/ for macOS permissions to confuse with it.
+LOCAL_INSTALL_APP = /Applications/FreeFlow.app
+LOCAL_IDENTITY ?= $(shell security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -1)
+LOCAL_VERSION ?= $(shell git describe --tags --abbrev=0 | sed 's/^v//')
+
+install-local:
+	@test -n "$(LOCAL_IDENTITY)" || { echo "No Apple Development signing identity found"; exit 1; }
+	@rm -rf "$(BUILD_DIR)/FreeFlow.app"
+	$(MAKE) all APP_NAME=FreeFlow BUNDLE_ID=com.zachlatta.freeflow CODESIGN_IDENTITY="$(LOCAL_IDENTITY)"
+	@plutil -replace CFBundleShortVersionString -string "$(LOCAL_VERSION)" "$(BUILD_DIR)/FreeFlow.app/Contents/Info.plist"
+	@codesign --force --options runtime --sign "$(LOCAL_IDENTITY)" --entitlements FreeFlow.entitlements "$(BUILD_DIR)/FreeFlow.app"
+	@osascript -e 'quit app "FreeFlow"' >/dev/null 2>&1 || true
+	@while pgrep -x FreeFlow >/dev/null; do sleep 0.5; done
+	@rm -rf "$(LOCAL_INSTALL_APP)"
+	@mv "$(BUILD_DIR)/FreeFlow.app" "$(LOCAL_INSTALL_APP)"
+	@echo "Installed $(LOCAL_INSTALL_APP) ($(LOCAL_VERSION), signed by $(LOCAL_IDENTITY))"
