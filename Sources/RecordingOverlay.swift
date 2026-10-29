@@ -6,6 +6,8 @@ import AppKit
 final class RecordingOverlayState: ObservableObject {
     @Published var phase: OverlayPhase = .recording
     @Published var recordingStartedAt: ContinuousClock.Instant?
+    /// Freezes the elapsed timer once recording stops.
+    @Published var recordingStoppedAt: ContinuousClock.Instant?
     @Published var showsRecordingTimer = RecordingTimerPreference.defaultEnabled
     @Published var audioLevel: Float = 0.0
     @Published var recordingTriggerMode: RecordingTriggerMode = .hold
@@ -18,6 +20,21 @@ final class RecordingOverlayState: ObservableObject {
     /// the panel only accepts clicks in that mode.
     var showsSessionControls: Bool {
         phase == .recording && recordingTriggerMode == .toggle
+    }
+
+    /// Recording and transcribing share one layout so the overlay keeps its
+    /// shape: the waveform settles flat and a spinner takes the checkmark's place.
+    var showsRecordingLayout: Bool {
+        phase == .recording || phase == .transcribing
+    }
+
+    /// Tap-to-toggle recordings keep their control slots while transcribing.
+    var reservesSessionControlSpace: Bool {
+        showsRecordingLayout && recordingTriggerMode == .toggle
+    }
+
+    var isProcessing: Bool {
+        phase == .transcribing
     }
 }
 
@@ -213,6 +230,7 @@ final class RecordingOverlayManager {
             self.overlayState.recordingTriggerMode = mode
             self.overlayState.isCommandMode = isCommandMode
             self.overlayState.recordingStartedAt = nil
+            self.overlayState.recordingStoppedAt = nil
             self.overlayState.phase = .initializing
             self.overlayState.audioLevel = 0
             self.showOverlayPanel(animatedResize: false)
@@ -255,6 +273,7 @@ final class RecordingOverlayManager {
     private func beginRecordingTimer(startedAt: ContinuousClock.Instant, showsRecordingTimer: Bool) {
         overlayState.showsRecordingTimer = showsRecordingTimer
         overlayState.recordingStartedAt = startedAt
+        overlayState.recordingStoppedAt = nil
     }
 
     func setRecordingTriggerMode(_ mode: RecordingTriggerMode, animated: Bool) {
@@ -396,7 +415,15 @@ final class RecordingOverlayManager {
 
     private func setTranscribingPhase() {
         lockedOverlayWidth = overlayWindow?.frame.width ?? overlayWidth
+        overlayState.recordingStoppedAt = .now
         overlayState.phase = .transcribing
+
+        // Keep the mounted view when the frame is unchanged so the waveform
+        // settles and the spinner fades in place instead of being rebuilt.
+        if let panel = overlayWindow, panel.frame.equalTo(overlayFrame) {
+            panel.ignoresMouseEvents = !overlayAcceptsMouseEvents
+            return
+        }
         showOverlayPanel(animatedResize: true)
     }
 
@@ -492,8 +519,8 @@ final class RecordingOverlayManager {
     /// Recording needs just enough room for the timer on the left, plus
     /// the X and checkmark at the outer edges in tap-to-toggle mode.
     private var activeWingWidth: CGFloat {
-        let base: CGFloat = overlayState.phase == .recording && overlayState.showsRecordingTimer ? 48 : 36
-        return overlayState.showsSessionControls ? base + 22 : base
+        let base: CGFloat = overlayState.showsRecordingLayout && overlayState.showsRecordingTimer ? 48 : 36
+        return overlayState.reservesSessionControlSpace ? base + 22 : base
     }
 
     private var overlayFrame: NSRect {
@@ -541,12 +568,12 @@ final class RecordingOverlayManager {
     }
 
     private var overlayWidth: CGFloat {
-        if let lockedOverlayWidth, overlayState.phase == .transcribing {
-            return lockedOverlayWidth
-        }
-
         if placement == .bottom {
             return BottomPillOverlayView.width(for: overlayState)
+        }
+
+        if let lockedOverlayWidth, overlayState.phase == .transcribing {
+            return lockedOverlayWidth
         }
 
         if overlayState.phase == .feedback {
@@ -580,7 +607,7 @@ final class RecordingOverlayManager {
 
         if overlayState.isCommandMode {
             baseWidth = commandModeWidth
-        } else if overlayState.showsSessionControls {
+        } else if overlayState.reservesSessionControlSpace {
             baseWidth = toggleWidth
         } else {
             baseWidth = defaultWidth
@@ -590,12 +617,12 @@ final class RecordingOverlayManager {
         // The X joins the leading slot in tap-to-toggle mode, so the slots
         // on both sides of the centered timer need more room.
         let timerWidth: CGFloat
-        if overlayState.showsSessionControls {
+        if overlayState.reservesSessionControlSpace {
             timerWidth = overlayState.isCommandMode ? 260 : 216
         } else {
             timerWidth = overlayState.isCommandMode ? 224 : 180
         }
-        let width = overlayState.phase == .recording && overlayState.showsRecordingTimer
+        let width = overlayState.showsRecordingLayout && overlayState.showsRecordingTimer
             ? max(baseWidth, timerWidth)
             : baseWidth
         guard screenHasNotch else { return width }
@@ -611,6 +638,7 @@ final class RecordingOverlayManager {
     private func dismissAll() {
         lockedOverlayWidth = nil
         overlayState.recordingStartedAt = nil
+        overlayState.recordingStoppedAt = nil
         overlayState.isCommandMode = false
         overlayState.updateVersion = ""
         if let panel = overlayWindow {
@@ -641,10 +669,6 @@ struct WingedRecordingView: View {
     private let controlDiameter: CGFloat = 16
     private let controlEdgeInset: CGFloat = 8
 
-    private var showsLiveRecordingContent: Bool {
-        state.phase == .recording
-    }
-
     var body: some View {
         wingsHStack
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -655,8 +679,9 @@ struct WingedRecordingView: View {
         HStack(spacing: 0) {
             // Left wing — empty during feedback so the right-wing X reads as the sole signal.
             HStack(spacing: 0) {
-                if state.showsSessionControls {
+                if state.reservesSessionControlSpace {
                     DiscardRecordingButton(diameter: controlDiameter, action: onCancelButtonPressed)
+                        .opacity(state.showsSessionControls ? 1 : 0.35)
                         .padding(.leading, controlEdgeInset)
                         .transition(.opacity)
                 }
@@ -667,7 +692,7 @@ struct WingedRecordingView: View {
                     } else if state.phase == .initializing {
                         InitializingDotsView()
                             .transition(.opacity)
-                    } else if showsLiveRecordingContent {
+                    } else if state.showsRecordingLayout {
                         VStack(spacing: 1) {
                             if state.isCommandMode {
                                 Image(systemName: "pencil")
@@ -676,18 +701,18 @@ struct WingedRecordingView: View {
                                     .transition(.opacity)
                             }
                             if state.showsRecordingTimer, let start = state.recordingStartedAt {
-                                RecordingElapsedTimeView(start: start)
+                                RecordingElapsedTimeView(start: start, end: state.recordingStoppedAt)
                             } else {
                                 CompactWaveformView(
                                     audioLevel: state.audioLevel,
-                                    showsActivityPulse: true
+                                    showsActivityPulse: true,
+                                    isSettled: state.isProcessing
                                 )
                             }
                         }
                         .transition(.opacity)
                     } else {
-                        CompactProcessingIndicatorView()
-                            .transition(.opacity)
+                        Color.clear
                     }
                 }
                 Spacer(minLength: 0)
@@ -699,7 +724,7 @@ struct WingedRecordingView: View {
                 .frame(width: notchWidth, height: height)
 
             // Right wing — finish checkmark at the outer edge, mirroring the
-            // X, or the failure X centered.
+            // X, then the spinner in its place; or the failure X centered.
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
                 if state.phase == .feedback {
@@ -714,6 +739,14 @@ struct WingedRecordingView: View {
                     FinishRecordingButton(diameter: controlDiameter, action: onStopButtonPressed)
                         .padding(.trailing, controlEdgeInset)
                         .transition(.opacity)
+                } else if state.isProcessing {
+                    ProcessingSpinner(diameter: 11, lineWidth: 1.75)
+                        .frame(width: controlDiameter, height: controlDiameter)
+                        .padding(.trailing, state.reservesSessionControlSpace ? controlEdgeInset : 0)
+                        .transition(.opacity)
+                    if !state.reservesSessionControlSpace {
+                        Spacer(minLength: 0)
+                    }
                 }
             }
             .frame(width: rightWingWidth, height: height)
@@ -741,6 +774,8 @@ struct WaveformBar: View {
 struct WaveformView: View {
     let audioLevel: Float
     var showsActivityPulse = false
+    /// Flattens and dims the bars once recording stops.
+    var isSettled = false
 
     private static let barCount = 9
     private static let multipliers: [CGFloat] = [0.35, 0.55, 0.75, 0.9, 1.0, 0.9, 0.75, 0.55, 0.35]
@@ -749,7 +784,7 @@ struct WaveformView: View {
     var body: some View {
         Group {
             if showsActivityPulse {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isSettled)) { context in
                     waveformBars(pulseTime: context.date.timeIntervalSinceReferenceDate)
                 }
             } else {
@@ -757,6 +792,8 @@ struct WaveformView: View {
             }
         }
         .frame(height: 24)
+        .opacity(isSettled ? 0.5 : 1)
+        .animation(.easeOut(duration: 0.3), value: isSettled)
     }
 
     private func waveformBars(pulseTime: TimeInterval?) -> some View {
@@ -776,6 +813,7 @@ struct WaveformView: View {
     }
 
     private func barAmplitude(for index: Int, pulseTime: TimeInterval?) -> CGFloat {
+        guard !isSettled else { return 0 }
         let level = CGFloat(max(audioLevel, 0))
         let baseAmplitude = min(level * Self.multipliers[index], 1.0)
 
@@ -806,6 +844,8 @@ struct WaveformView: View {
 struct CompactWaveformView: View {
     let audioLevel: Float
     var showsActivityPulse = false
+    /// Flattens and dims the bars once recording stops.
+    var isSettled = false
 
     private static let barCount = 5
     private static let multipliers: [CGFloat] = [0.5, 0.75, 1.0, 0.75, 0.5]
@@ -814,7 +854,7 @@ struct CompactWaveformView: View {
     var body: some View {
         Group {
             if showsActivityPulse {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isSettled)) { context in
                     bars(pulseTime: context.date.timeIntervalSinceReferenceDate)
                 }
             } else {
@@ -822,6 +862,8 @@ struct CompactWaveformView: View {
             }
         }
         .frame(height: 18)
+        .opacity(isSettled ? 0.5 : 1)
+        .animation(.easeOut(duration: 0.3), value: isSettled)
     }
 
     private func bars(pulseTime: TimeInterval?) -> some View {
@@ -837,6 +879,7 @@ struct CompactWaveformView: View {
     }
 
     private func amplitude(for index: Int, pulseTime: TimeInterval?) -> CGFloat {
+        guard !isSettled else { return 0 }
         let level = CGFloat(max(audioLevel, 0))
         let base = min(level * Self.multipliers[index], 1.0)
         guard let pulseTime else { return base }
@@ -861,202 +904,24 @@ struct CompactWaveformBar: View {
     }
 }
 
-struct ProcessingWaveformView: View {
-    private static let barCount = 5
-    private static let centerIndex = CGFloat((barCount - 1) / 2)
+/// One continuous spinner for the whole transcribe-and-clean-up step.
+/// Rotation is driven by the timeline rather than a repeating animation so
+/// it never inherits the layout springs around it.
+struct ProcessingSpinner: View {
+    let diameter: CGFloat
+    let lineWidth: CGFloat
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-
-            HStack(spacing: 4) {
-                ForEach(0..<Self.barCount, id: \.self) { index in
-                    ProcessingPill(
-                        amplitude: amplitude(for: index, time: time),
-                        opacity: opacity(for: index, time: time)
-                    )
-                }
-            }
-            .frame(height: 20)
+        TimelineView(.animation) { context in
+            let degrees = (context.date.timeIntervalSinceReferenceDate * 450)
+                .truncatingRemainder(dividingBy: 360)
+            Circle()
+                .trim(from: 0.1, to: 0.9)
+                .stroke(Color.white, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .frame(width: diameter, height: diameter)
+                .rotationEffect(.degrees(degrees))
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func phase(for index: Int, time: TimeInterval) -> Double {
-        let cycle = 1.05
-        let stagger = 0.11
-        return ((time - Double(index) * stagger).truncatingRemainder(dividingBy: cycle)) / cycle
-    }
-
-    private func pulse(for index: Int, time: TimeInterval) -> CGFloat {
-        let phase = phase(for: index, time: time)
-        let wave = 0.5 + 0.5 * sin((phase * 2.0 * .pi) - (.pi / 2.0))
-        return CGFloat(pow(wave, 1.9))
-    }
-
-    private func amplitude(for index: Int, time: TimeInterval) -> CGFloat {
-        let centerDistance = abs(CGFloat(index) - Self.centerIndex) / Self.centerIndex
-        let baseline = 0.18 + (1.0 - centerDistance) * 0.1
-        return min(baseline + pulse(for: index, time: time) * 0.68, 1.0)
-    }
-
-    private func opacity(for index: Int, time: TimeInterval) -> CGFloat {
-        0.42 + pulse(for: index, time: time) * 0.52
-    }
-}
-
-private struct ProcessingPill: View {
-    let amplitude: CGFloat
-    let opacity: CGFloat
-
-    private let minHeight: CGFloat = 4
-    private let maxHeight: CGFloat = 18
-
-    var body: some View {
-        Capsule()
-            .fill(.white)
-            .frame(width: 4, height: minHeight + (maxHeight - minHeight) * amplitude)
-            .opacity(opacity)
-    }
-}
-
-struct ProcessingIndicatorView: View {
-    @State private var showsExtendedSpinner = false
-    @State private var rotation: Double = 0
-
-    var body: some View {
-        ZStack {
-            if showsExtendedSpinner {
-                Circle()
-                    .trim(from: 0.1, to: 0.9)
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                    .frame(width: 16, height: 16)
-                    .rotationEffect(.degrees(rotation))
-                    .frame(height: 20)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.opacity)
-                    .onAppear {
-                        rotation = 0
-                        withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                            rotation = 360
-                        }
-                    }
-            } else {
-                ProcessingWaveformView()
-                    .transition(.opacity)
-            }
-        }
-        .task {
-            showsExtendedSpinner = false
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    showsExtendedSpinner = true
-                }
-            } catch {}
-        }
-    }
-}
-
-/// Same hybrid waveform-then-spinner as `ProcessingIndicatorView`, sized to
-/// fit the 18pt winged menu-bar overlay. Uses tighter pills and a smaller
-/// spinner so the indicator stays inside the wing without the jolt to
-/// oversized capsules that the full-size indicator produced.
-struct CompactProcessingIndicatorView: View {
-    @State private var showsExtendedSpinner = false
-    @State private var rotation: Double = 0
-
-    var body: some View {
-        ZStack {
-            if showsExtendedSpinner {
-                Circle()
-                    .trim(from: 0.1, to: 0.9)
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
-                    .frame(width: 12, height: 12)
-                    .rotationEffect(.degrees(rotation))
-                    .frame(height: 18)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.opacity)
-                    .onAppear {
-                        rotation = 0
-                        withAnimation(.linear(duration: 0.8).repeatForever(autoreverses: false)) {
-                            rotation = 360
-                        }
-                    }
-            } else {
-                CompactProcessingWaveformView()
-                    .transition(.opacity)
-            }
-        }
-        .task {
-            showsExtendedSpinner = false
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    showsExtendedSpinner = true
-                }
-            } catch {}
-        }
-    }
-}
-
-struct CompactProcessingWaveformView: View {
-    private static let barCount = 5
-    private static let centerIndex = CGFloat((barCount - 1) / 2)
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: false)) { context in
-            let time = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: 2) {
-                ForEach(0..<Self.barCount, id: \.self) { index in
-                    CompactProcessingPill(
-                        amplitude: amplitude(for: index, time: time),
-                        opacity: opacity(for: index, time: time)
-                    )
-                }
-            }
-            .frame(height: 18)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func phase(for index: Int, time: TimeInterval) -> Double {
-        let cycle = 1.05
-        let stagger = 0.11
-        return ((time - Double(index) * stagger).truncatingRemainder(dividingBy: cycle)) / cycle
-    }
-
-    private func pulse(for index: Int, time: TimeInterval) -> CGFloat {
-        let phase = phase(for: index, time: time)
-        let wave = 0.5 + 0.5 * sin((phase * 2.0 * .pi) - (.pi / 2.0))
-        return CGFloat(pow(wave, 1.9))
-    }
-
-    private func amplitude(for index: Int, time: TimeInterval) -> CGFloat {
-        let centerDistance = abs(CGFloat(index) - Self.centerIndex) / Self.centerIndex
-        let baseline = 0.18 + (1.0 - centerDistance) * 0.1
-        return min(baseline + pulse(for: index, time: time) * 0.68, 1.0)
-    }
-
-    private func opacity(for index: Int, time: TimeInterval) -> CGFloat {
-        0.42 + pulse(for: index, time: time) * 0.52
-    }
-}
-
-private struct CompactProcessingPill: View {
-    let amplitude: CGFloat
-    let opacity: CGFloat
-
-    private let minHeight: CGFloat = 2
-    private let maxHeight: CGFloat = 12
-
-    var body: some View {
-        Capsule()
-            .fill(.white)
-            .frame(width: 2, height: minHeight + (maxHeight - minHeight) * amplitude)
-            .opacity(opacity)
+        .accessibilityLabel("Transcribing")
     }
 }
 
@@ -1097,16 +962,12 @@ struct RecordingOverlayView: View {
     private let controlDiameter: CGFloat = 16
 
     private var leadingAccessoryWidth: CGFloat {
-        let width: CGFloat = showsLiveRecordingContent && state.showsRecordingTimer
+        let width: CGFloat = state.showsRecordingLayout && state.showsRecordingTimer
             ? (state.isCommandMode ? 72 : 48)
             : 24
-        return state.showsSessionControls ? width + controlDiameter + 6 : width
+        return state.reservesSessionControlSpace ? width + controlDiameter + 6 : width
     }
     private let trailingAccessoryWidth: CGFloat = 32
-
-    private var showsLiveRecordingContent: Bool {
-        state.phase == .recording
-    }
 
     var body: some View {
         Group {
@@ -1122,34 +983,37 @@ struct RecordingOverlayView: View {
                         if state.phase == .initializing {
                             InitializingDotsView()
                                 .transition(.opacity)
-                        } else if showsLiveRecordingContent {
+                        } else if state.showsRecordingLayout {
                             if state.showsRecordingTimer, let start = state.recordingStartedAt {
-                                RecordingElapsedTimeView(start: start)
+                                RecordingElapsedTimeView(start: start, end: state.recordingStoppedAt)
                                     .transition(.opacity)
                             } else {
-                                WaveformView(audioLevel: state.audioLevel, showsActivityPulse: true)
-                                    .transition(.opacity)
-                            }
-                        } else {
-                            ProcessingIndicatorView()
+                                WaveformView(
+                                    audioLevel: state.audioLevel,
+                                    showsActivityPulse: true,
+                                    isSettled: state.isProcessing
+                                )
                                 .transition(.opacity)
+                            }
                         }
                     }
 
                     HStack {
                         HStack(spacing: 6) {
-                            if state.showsSessionControls {
+                            if state.reservesSessionControlSpace {
                                 DiscardRecordingButton(diameter: controlDiameter, action: onCancelButtonPressed)
+                                    .opacity(state.showsSessionControls ? 1 : 0.35)
                                     .transition(.opacity)
                             }
-                            if showsLiveRecordingContent && state.showsRecordingTimer {
+                            if state.showsRecordingLayout && state.showsRecordingTimer {
                                 HStack(spacing: 6) {
                                     if state.isCommandMode {
                                         CommandModeIndicator()
                                     }
                                     WaveformView(
                                         audioLevel: state.audioLevel,
-                                        showsActivityPulse: true
+                                        showsActivityPulse: true,
+                                        isSettled: state.isProcessing
                                     )
                                 }
                                 .transition(.opacity)
@@ -1160,7 +1024,7 @@ struct RecordingOverlayView: View {
                         }
                         .frame(
                             width: leadingAccessoryWidth,
-                            alignment: state.showsSessionControls ? .leading : .center
+                            alignment: state.reservesSessionControlSpace ? .leading : .center
                         )
                         .frame(maxHeight: .infinity, alignment: .center)
 
@@ -1169,6 +1033,10 @@ struct RecordingOverlayView: View {
                         Group {
                             if state.showsSessionControls {
                                 FinishRecordingButton(diameter: controlDiameter, action: onStopButtonPressed)
+                                    .transition(.opacity)
+                            } else if state.isProcessing {
+                                ProcessingSpinner(diameter: 12, lineWidth: 2)
+                                    .frame(width: controlDiameter, height: controlDiameter)
                                     .transition(.opacity)
                             }
                         }
@@ -1188,7 +1056,8 @@ struct RecordingOverlayView: View {
 // MARK: - Bottom Pill View
 
 /// Small floating pill: just the waveform, flanked by a discard X and a
-/// finish checkmark in tap-to-toggle mode.
+/// finish checkmark in tap-to-toggle mode. While transcribing, the
+/// waveform settles flat and a spinner sits where the checkmark was.
 struct BottomPillOverlayView: View {
     @ObservedObject var state: RecordingOverlayState
     let onStopButtonPressed: () -> Void
@@ -1215,17 +1084,22 @@ struct BottomPillOverlayView: View {
             return min(420, max(180, CGFloat(message.count) * 6.8 + 60))
         case .updateAvailable:
             return 150
-        case .initializing, .transcribing:
+        case .initializing:
             return horizontalPadding * 2 + waveformSize.width
-        case .recording:
+        case .recording, .transcribing:
             var content = waveformSize.width
             if state.isCommandMode { content += commandIndicatorWidth + itemSpacing }
             if state.showsRecordingTimer { content += timerWidth + itemSpacing }
-            let side = state.showsSessionControls
-                ? controlEdgePadding + controlDiameter + controlSpacing
-                : horizontalPadding
-            return content + side * 2
+            let controlSide = controlEdgePadding + controlDiameter + controlSpacing
+            let leading = state.reservesSessionControlSpace ? controlSide : horizontalPadding
+            let trailing = hasTrailingControl(state) ? controlSide : horizontalPadding
+            return content + leading + trailing
         }
+    }
+
+    /// The checkmark while recording in tap-to-toggle mode, then the spinner.
+    private static func hasTrailingControl(_ state: RecordingOverlayState) -> Bool {
+        state.reservesSessionControlSpace || state.isProcessing
     }
 
     var body: some View {
@@ -1244,10 +1118,7 @@ struct BottomPillOverlayView: View {
             case .initializing:
                 InitializingDotsView()
                     .transition(.opacity)
-            case .transcribing:
-                CompactProcessingIndicatorView()
-                    .transition(.opacity)
-            case .recording:
+            case .recording, .transcribing:
                 recordingContent
                     .transition(.opacity)
             }
@@ -1258,25 +1129,36 @@ struct BottomPillOverlayView: View {
 
     private var recordingContent: some View {
         HStack(spacing: Self.controlSpacing) {
-            if state.showsSessionControls {
+            if state.reservesSessionControlSpace {
                 DiscardRecordingButton(diameter: Self.controlDiameter, action: onCancelButtonPressed)
+                    .opacity(state.showsSessionControls ? 1 : 0.35)
             }
             HStack(spacing: Self.itemSpacing) {
                 if state.isCommandMode {
                     CommandModeIndicator()
                 }
-                WaveformView(audioLevel: state.audioLevel, showsActivityPulse: true)
-                    .scaleEffect(0.72)
-                    .frame(width: Self.waveformSize.width, height: Self.waveformSize.height)
+                WaveformView(
+                    audioLevel: state.audioLevel,
+                    showsActivityPulse: true,
+                    isSettled: state.isProcessing
+                )
+                .scaleEffect(0.72)
+                .frame(width: Self.waveformSize.width, height: Self.waveformSize.height)
                 if state.showsRecordingTimer, let start = state.recordingStartedAt {
-                    RecordingElapsedTimeView(start: start)
+                    RecordingElapsedTimeView(start: start, end: state.recordingStoppedAt)
                 }
             }
             if state.showsSessionControls {
                 FinishRecordingButton(diameter: Self.controlDiameter, action: onStopButtonPressed)
+                    .transition(.opacity)
+            } else if state.isProcessing {
+                ProcessingSpinner(diameter: 14, lineWidth: 2)
+                    .frame(width: Self.controlDiameter, height: Self.controlDiameter)
+                    .transition(.opacity)
             }
         }
-        .padding(.horizontal, state.showsSessionControls ? Self.controlEdgePadding : Self.horizontalPadding)
+        .padding(.leading, state.reservesSessionControlSpace ? Self.controlEdgePadding : Self.horizontalPadding)
+        .padding(.trailing, Self.hasTrailingControl(state) ? Self.controlEdgePadding : Self.horizontalPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -1286,10 +1168,11 @@ struct BottomPillOverlayView: View {
 /// also keeps system clock adjustments from changing the displayed duration.
 private struct RecordingElapsedTimeView: View {
     let start: ContinuousClock.Instant
+    var end: ContinuousClock.Instant?
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            let seconds = max(0, start.duration(to: .now).components.seconds)
+            let seconds = max(0, start.duration(to: end ?? .now).components.seconds)
             Text(String(format: "%lld:%02lld", seconds / 60, seconds % 60))
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.9))

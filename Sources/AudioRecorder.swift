@@ -87,6 +87,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private var loggedCaptureFormat = false
     private var fileWriteError: Error?
     private var isSessionInterrupted = false
+    /// Keeps the capture session running between recordings. Session-queue confined.
+    private var keepsSessionWarm = false
 
     @Published var isRecording = false
     private let _recording = OSAllocatedUnfairLock(initialState: false)
@@ -195,7 +197,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError
             let wrapped = error.map { AudioRecorderError.failedToStartCaptureSession($0.localizedDescription) }
                 ?? AudioRecorderError.failedToStartCaptureSession("Unknown runtime error")
-            self?.reportRecordingFailure(wrapped)
+            self?.handleRuntimeError(wrapped)
         }
         sessionObservers.append(runtimeObserver)
 
@@ -322,11 +324,26 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         return shouldKeepFile ? finalizedURL : nil
     }
 
+    /// An idle warm session has no recording to fail, so it is released quietly
+    /// and the next recording takes the cold path.
+    private func handleRuntimeError(_ error: Error) {
+        guard _recording.withLock({ $0 }) else {
+            sessionQueue.async {
+                guard !self._recording.withLock({ $0 }) else { return }
+                os_log(.error, log: recordingLog, "idle capture session failed — releasing it")
+                self.teardownSessionLocked()
+            }
+            return
+        }
+        reportRecordingFailure(error)
+    }
+
     private func handleSessionInterrupted(_ notification: Notification) {
         _ = notification
         sessionQueue.async {
-            guard self._recording.withLock({ $0 }) else { return }
+            // Track interruptions while idle too, so a warm session is not reused mid-interruption.
             self.isSessionInterrupted = true
+            guard self._recording.withLock({ $0 }) else { return }
             self.cancelWatchdog()
             os_log(.info, log: recordingLog, "capture session interrupted — waiting for recovery")
         }
@@ -335,8 +352,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private func handleSessionInterruptionEnded(_ notification: Notification) {
         _ = notification
         sessionQueue.async {
-            guard self._recording.withLock({ $0 }) else { return }
             self.isSessionInterrupted = false
+            guard self._recording.withLock({ $0 }) else { return }
             os_log(.info, log: recordingLog, "capture session interruption ended — restarting watchdog")
             self.startBufferWatchdog()
         }
@@ -566,10 +583,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         return ConversionResult(buffer: outputBuffer, status: String(describing: status))
     }
 
-    private func makeSession(deviceUID: String?, outputURL: URL) throws {
+    private func makeSession(deviceUID: String?, reason: String = "initial start") throws {
         teardownSessionLocked()
 
-        let device = try preferredCaptureDevice(for: deviceUID, reason: "initial start")
+        let device = try preferredCaptureDevice(for: deviceUID, reason: reason)
 
         let session = AVCaptureSession()
         let dataOutput = AVCaptureAudioDataOutput()
@@ -616,15 +633,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         currentInput = input
         audioDataOutput = dataOutput
         isSessionInterrupted = false
-        activeAudioFile = nil
-        activeAudioFormat = nil
-        recordingConverterLock.withLock { $0 = nil }
-        pcm16ConverterLock.withLock { $0 = nil }
-        recordedFrameCount = 0
-        loggedCaptureFormat = false
-        fileWriteErrorLock.withLock { _ in
-            fileWriteError = nil
-        }
+        resetRecordingStateLocked()
         installSessionObservers(for: session)
 
         os_log(.info, log: recordingLog, "configured capture session with device %{public}@ [uid=%{public}@]", device.localizedName, device.uniqueID)
@@ -635,7 +644,81 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
 
         os_log(.info, log: recordingLog, "capture session running with device %{public}@ [uid=%{public}@]", device.localizedName, device.uniqueID)
-        tempFileURL = outputURL
+    }
+
+    /// Clears per-recording writer state. Runs on the sample-buffer queue so a
+    /// warm session's in-flight callbacks never see a half-reset writer.
+    private func resetRecordingStateLocked() {
+        sampleBufferQueue.sync {
+            self.activeAudioFile = nil
+            self.activeAudioFormat = nil
+            self.recordingConverterLock.withLock { $0 = nil }
+            self.pcm16ConverterLock.withLock { $0 = nil }
+            self.recordedFrameCount = 0
+            self.loggedCaptureFormat = false
+            self.fileWriteErrorLock.withLock { _ in
+                self.fileWriteError = nil
+            }
+        }
+    }
+
+    /// Same device choice as `preferredCaptureDevice`, without enumerating
+    /// devices on the common path, so a warm start stays fast.
+    private static func resolvedDeviceUID(for requestedDeviceUID: String?) -> String? {
+        if let requestedDeviceUID, !requestedDeviceUID.isEmpty, requestedDeviceUID != "default",
+           let device = AVCaptureDevice(uniqueID: requestedDeviceUID), device.isConnected {
+            return device.uniqueID
+        }
+        return defaultCaptureDevice()?.uniqueID
+    }
+
+    private func canReuseWarmSessionLocked(deviceUID: String?) -> Bool {
+        guard let captureSession else { return false }
+        return MicrophoneReadinessPreference.canReuseWarmSession(
+            isRunning: captureSession.isRunning,
+            isInterrupted: isSessionInterrupted,
+            warmDeviceUID: currentInput?.device.uniqueID,
+            resolvedDeviceUID: Self.resolvedDeviceUID(for: deviceUID)
+        )
+    }
+
+    /// Ends capture for the current recording. A warm session keeps running, so
+    /// stop accepting buffers behind the ones already queued instead of
+    /// stopping the device; those queued buffers still reach the file.
+    private func endCaptureLocked() {
+        if keepsSessionWarm, captureSession?.isRunning == true, !isSessionInterrupted {
+            sampleBufferQueue.sync {
+                self._recording.withLock { $0 = false }
+            }
+        } else {
+            teardownSessionLocked()
+        }
+    }
+
+    /// Opens the microphone ahead of the next recording and keeps it open
+    /// between recordings until `coolDown()`. Buffers are dropped while idle.
+    func warmUp(deviceUID: String?) {
+        sessionQueue.async {
+            self.keepsSessionWarm = true
+            guard !self._recording.withLock({ $0 }) else { return }
+            guard !self.canReuseWarmSessionLocked(deviceUID: deviceUID) else { return }
+            do {
+                try self.makeSession(deviceUID: deviceUID, reason: "warm up")
+            } catch {
+                os_log(.error, log: recordingLog, "warm up failed: %{public}@", error.localizedDescription)
+                self.teardownSessionLocked()
+            }
+        }
+    }
+
+    /// Releases an idle warm session. A recording in progress keeps its
+    /// session and releases it when it ends.
+    func coolDown() {
+        sessionQueue.async {
+            self.keepsSessionWarm = false
+            guard !self._recording.withLock({ $0 }) else { return }
+            self.teardownSessionLocked()
+        }
     }
 
     /// Called before scheduling capture setup so cancellation also invalidates pending starts.
@@ -658,7 +741,13 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         do {
             try sessionQueue.sync {
-                try self.makeSession(deviceUID: deviceUID, outputURL: outputURL)
+                if self.canReuseWarmSessionLocked(deviceUID: deviceUID) {
+                    os_log(.info, log: recordingLog, "reusing warm capture session")
+                    self.resetRecordingStateLocked()
+                } else {
+                    try self.makeSession(deviceUID: deviceUID)
+                }
+                self.tempFileURL = outputURL
                 self.captureTiming.withLock { $0.start(at: .now, generation: timingGeneration) }
                 self._recording.withLock { $0 = true }
                 self.startBufferWatchdog()
@@ -689,7 +778,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         sessionQueue.async {
             self.cancelWatchdog()
-            self.teardownSessionLocked()
+            self.endCaptureLocked()
             let outputURL = self.finishAudioFileLocked(discard: false)
             self._recording.withLock { $0 = false }
             self.liveLevelNormalizerLock.withLock { $0.reset() }
@@ -705,7 +794,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         captureTiming.withLock { $0.invalidate() }
         sessionQueue.async {
             self.cancelWatchdog()
-            self.teardownSessionLocked()
+            self.endCaptureLocked()
             let discardURL = self.finishAudioFileLocked(discard: true)
             self._recording.withLock { $0 = false }
             self.liveLevelNormalizerLock.withLock { $0.reset() }
