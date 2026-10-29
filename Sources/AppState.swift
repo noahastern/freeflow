@@ -649,7 +649,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var accessibilityTimer: Timer?
     private var audioLevelCancellable: AnyCancellable?
     private var debugOverlayTimer: Timer?
-    private var recordingInitializationTimer: DispatchSourceTimer?
     private var microphoneCoolDownTimer: Timer?
     private var transcriptionTask: Task<Void, Never>?
     private var transcribingAudioFileName: String?
@@ -2017,7 +2016,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         audioRecorder.onRecordingFailure = nil
         audioLevelCancellable?.cancel()
         audioLevelCancellable = nil
-        cancelRecordingInitializationTimer()
         contextCaptureTask?.cancel()
         contextCaptureTask = nil
         capturedContext = nil
@@ -2365,7 +2363,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         shortcutSessionController.reset()
         activeRecordingTriggerMode = nil
         activeTextInsertionTarget = nil
-        cancelRecordingInitializationTimer()
         audioRecorder.onRecordingReady = nil
         audioRecorder.onRecordingFailure = nil
         audioLevelCancellable?.cancel()
@@ -2424,56 +2421,30 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let timingGeneration = audioRecorder.prepareRecordingTiming()
         noteMicrophoneUse()
 
-        // Show initializing dots only if engine takes longer than 0.2s to start
-        var overlayShown = false
-        cancelRecordingInitializationTimer()
-        let initTimer = DispatchSource.makeTimerSource(queue: .main)
-        recordingInitializationTimer = initTimer
-        initTimer.schedule(deadline: .now() + 0.2)
-        initTimer.setEventHandler { [weak self] in
-            guard let self, !overlayShown else { return }
-            overlayShown = true
-            os_log(.info, log: recordingLog, "engine slow — showing initializing overlay")
-            self.clearPendingOverlayDismissToken()
-            self.overlayManager.showInitializing(
-                mode: self.activeRecordingTriggerMode ?? triggerMode,
-                isCommandMode: self.currentSessionIntent.isCommandMode
-            )
-        }
-        initTimer.resume()
+        // Show the pill as soon as the shortcut fires so the app never looks
+        // like it is loading; the waveform stays flat until the microphone is live.
+        overlayManager.showRecording(
+            mode: activeRecordingTriggerMode ?? triggerMode,
+            isCommandMode: currentSessionIntent.isCommandMode,
+            showsRecordingTimer: showsRecordingTimer,
+            isAwaitingAudio: true
+        )
 
-        // Transition to waveform when first real audio arrives (any non-zero RMS)
+        // Bring the waveform to life when first real audio arrives (any non-zero RMS)
         let deviceUID = selectedMicrophoneID
         audioRecorder.onRecordingReady = { [weak self] captureStartedAt in
             // The recorder already delivers on main after validating the generation.
             // Do not enqueue again: cancellation could invalidate it between main-queue blocks.
             guard let self, self.isRecording, self.activeRecordingTriggerMode != nil else { return }
-            self.cancelRecordingInitializationTimer()
-            os_log(.info, log: recordingLog, "first real audio — transitioning to waveform")
+            os_log(.info, log: recordingLog, "first real audio — waveform live")
             self.statusText = "Recording..."
             self.clearPendingOverlayDismissToken()
-            if overlayShown {
-                self.overlayManager.transitionToRecording(
-                    mode: self.activeRecordingTriggerMode ?? triggerMode,
-                    isCommandMode: self.currentSessionIntent.isCommandMode,
-                    startedAt: captureStartedAt,
-                    showsRecordingTimer: showsRecordingTimer
-                )
-            } else {
-                self.overlayManager.showRecording(
-                    mode: self.activeRecordingTriggerMode ?? triggerMode,
-                    isCommandMode: self.currentSessionIntent.isCommandMode,
-                    startedAt: captureStartedAt,
-                    showsRecordingTimer: showsRecordingTimer
-                )
-            }
-            overlayShown = true
+            self.overlayManager.markAudioReady(startedAt: captureStartedAt)
             self.playAlertSound(named: self.startSound)
         }
         audioRecorder.onRecordingFailure = { [weak self] error in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.cancelRecordingInitializationTimer()
                 self.handleRecordingFailure(error)
             }
         }
@@ -2498,7 +2469,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.cancelRecordingInitializationTimer()
                     guard self.isRecording || self.activeRecordingTriggerMode != nil else { return }
                     self.handleRecordingFailure(error)
                 }
@@ -2507,7 +2477,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func handleRecordingFailure(_ error: Error) {
-        cancelRecordingInitializationTimer()
         audioRecorder.onRecordingReady = nil
         audioRecorder.onRecordingFailure = nil
         audioLevelCancellable?.cancel()
@@ -2826,7 +2795,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func stopAndTranscribe() {
         cancelPendingShortcutStart()
-        cancelRecordingInitializationTimer()
         shortcutSessionController.reset()
         let textInsertionTarget = activeTextInsertionTarget
         let useOriginalFieldInsertion = activeOriginalFieldInsertionEnabled
@@ -3923,11 +3891,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
             completion?()
         }
-    }
-
-    private func cancelRecordingInitializationTimer() {
-        recordingInitializationTimer?.cancel()
-        recordingInitializationTimer = nil
     }
 
     private func scheduleReadyStatusReset(after delay: TimeInterval, matching statuses: Set<String>? = nil) {

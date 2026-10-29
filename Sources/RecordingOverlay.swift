@@ -10,6 +10,9 @@ final class RecordingOverlayState: ObservableObject {
     @Published var recordingStoppedAt: ContinuousClock.Instant?
     @Published var showsRecordingTimer = RecordingTimerPreference.defaultEnabled
     @Published var audioLevel: Float = 0.0
+    /// The pill shows on the shortcut press; the waveform stays flat until
+    /// the microphone delivers its first real audio.
+    @Published var isAwaitingAudio = false
     @Published var recordingTriggerMode: RecordingTriggerMode = .hold
     @Published var isCommandMode = false
     @Published var updateVersion: String = ""
@@ -39,7 +42,6 @@ final class RecordingOverlayState: ObservableObject {
 }
 
 enum OverlayPhase {
-    case initializing
     case recording
     case transcribing
     case feedback
@@ -224,49 +226,32 @@ final class RecordingOverlayManager {
             || overlayState.phase == .updateAvailable
     }
 
-    func showInitializing(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
-        DispatchQueue.main.async {
-            self.lockedOverlayWidth = nil
-            self.overlayState.recordingTriggerMode = mode
-            self.overlayState.isCommandMode = isCommandMode
-            self.overlayState.recordingStartedAt = nil
-            self.overlayState.recordingStoppedAt = nil
-            self.overlayState.phase = .initializing
-            self.overlayState.audioLevel = 0
-            self.showOverlayPanel(animatedResize: false)
-        }
-    }
-
     func showRecording(
         mode: RecordingTriggerMode = .hold,
         isCommandMode: Bool = false,
         startedAt: ContinuousClock.Instant = .now,
-        showsRecordingTimer: Bool
+        showsRecordingTimer: Bool,
+        isAwaitingAudio: Bool = false
     ) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
             self.overlayState.isCommandMode = isCommandMode
             self.beginRecordingTimer(startedAt: startedAt, showsRecordingTimer: showsRecordingTimer)
+            self.overlayState.isAwaitingAudio = isAwaitingAudio
             self.overlayState.phase = .recording
             self.overlayState.audioLevel = 0
             self.showOverlayPanel(animatedResize: true)
         }
     }
 
-    func transitionToRecording(
-        mode: RecordingTriggerMode = .hold,
-        isCommandMode: Bool = false,
-        startedAt: ContinuousClock.Instant = .now,
-        showsRecordingTimer: Bool
-    ) {
+    /// Lets the waveform respond once the microphone is live, and restarts
+    /// the timer from when capture actually began.
+    func markAudioReady(startedAt: ContinuousClock.Instant) {
         DispatchQueue.main.async {
-            self.lockedOverlayWidth = nil
-            self.overlayState.recordingTriggerMode = mode
-            self.overlayState.isCommandMode = isCommandMode
-            self.beginRecordingTimer(startedAt: startedAt, showsRecordingTimer: showsRecordingTimer)
-            self.overlayState.phase = .recording
-            self.updateOverlayLayout(animated: true)
+            guard self.overlayState.phase == .recording else { return }
+            self.overlayState.recordingStartedAt = startedAt
+            self.overlayState.isAwaitingAudio = false
         }
     }
 
@@ -416,6 +401,7 @@ final class RecordingOverlayManager {
     private func setTranscribingPhase() {
         lockedOverlayWidth = overlayWindow?.frame.width ?? overlayWidth
         overlayState.recordingStoppedAt = .now
+        overlayState.isAwaitingAudio = false
         overlayState.phase = .transcribing
 
         // Keep the mounted view when the frame is unchanged so the waveform
@@ -506,7 +492,7 @@ final class RecordingOverlayManager {
     private var useWingedLayout: Bool {
         guard screenHasNotch, placement == .menuBar else { return false }
         switch overlayState.phase {
-        case .recording, .initializing, .transcribing:
+        case .recording, .transcribing:
             return true
         case .feedback:
             return overlayState.errorMessage?.isEmpty ?? true
@@ -639,6 +625,7 @@ final class RecordingOverlayManager {
         lockedOverlayWidth = nil
         overlayState.recordingStartedAt = nil
         overlayState.recordingStoppedAt = nil
+        overlayState.isAwaitingAudio = false
         overlayState.isCommandMode = false
         overlayState.updateVersion = ""
         if let panel = overlayWindow {
@@ -689,9 +676,6 @@ struct WingedRecordingView: View {
                 Group {
                     if state.phase == .feedback {
                         Color.clear
-                    } else if state.phase == .initializing {
-                        InitializingDotsView()
-                            .transition(.opacity)
                     } else if state.showsRecordingLayout {
                         VStack(spacing: 1) {
                             if state.isCommandMode {
@@ -706,7 +690,8 @@ struct WingedRecordingView: View {
                                 CompactWaveformView(
                                     audioLevel: state.audioLevel,
                                     showsActivityPulse: true,
-                                    isSettled: state.isProcessing
+                                    isFlat: state.isAwaitingAudio || state.isProcessing,
+                                    isDimmed: state.isProcessing
                                 )
                             }
                         }
@@ -774,8 +759,10 @@ struct WaveformBar: View {
 struct WaveformView: View {
     let audioLevel: Float
     var showsActivityPulse = false
-    /// Flattens and dims the bars once recording stops.
-    var isSettled = false
+    /// Holds the bars flat: before the microphone is live and after recording stops.
+    var isFlat = false
+    /// Dims the bars once recording stops.
+    var isDimmed = false
 
     private static let barCount = 9
     private static let multipliers: [CGFloat] = [0.35, 0.55, 0.75, 0.9, 1.0, 0.9, 0.75, 0.55, 0.35]
@@ -784,7 +771,7 @@ struct WaveformView: View {
     var body: some View {
         Group {
             if showsActivityPulse {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isSettled)) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isFlat)) { context in
                     waveformBars(pulseTime: context.date.timeIntervalSinceReferenceDate)
                 }
             } else {
@@ -792,8 +779,9 @@ struct WaveformView: View {
             }
         }
         .frame(height: 24)
-        .opacity(isSettled ? 0.5 : 1)
-        .animation(.easeOut(duration: 0.3), value: isSettled)
+        .opacity(isDimmed ? 0.5 : 1)
+        .animation(.easeOut(duration: 0.3), value: isFlat)
+        .animation(.easeOut(duration: 0.3), value: isDimmed)
     }
 
     private func waveformBars(pulseTime: TimeInterval?) -> some View {
@@ -813,7 +801,7 @@ struct WaveformView: View {
     }
 
     private func barAmplitude(for index: Int, pulseTime: TimeInterval?) -> CGFloat {
-        guard !isSettled else { return 0 }
+        guard !isFlat else { return 0 }
         let level = CGFloat(max(audioLevel, 0))
         let baseAmplitude = min(level * Self.multipliers[index], 1.0)
 
@@ -844,8 +832,10 @@ struct WaveformView: View {
 struct CompactWaveformView: View {
     let audioLevel: Float
     var showsActivityPulse = false
-    /// Flattens and dims the bars once recording stops.
-    var isSettled = false
+    /// Holds the bars flat: before the microphone is live and after recording stops.
+    var isFlat = false
+    /// Dims the bars once recording stops.
+    var isDimmed = false
 
     private static let barCount = 5
     private static let multipliers: [CGFloat] = [0.5, 0.75, 1.0, 0.75, 0.5]
@@ -854,7 +844,7 @@ struct CompactWaveformView: View {
     var body: some View {
         Group {
             if showsActivityPulse {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isSettled)) { context in
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isFlat)) { context in
                     bars(pulseTime: context.date.timeIntervalSinceReferenceDate)
                 }
             } else {
@@ -862,8 +852,9 @@ struct CompactWaveformView: View {
             }
         }
         .frame(height: 18)
-        .opacity(isSettled ? 0.5 : 1)
-        .animation(.easeOut(duration: 0.3), value: isSettled)
+        .opacity(isDimmed ? 0.5 : 1)
+        .animation(.easeOut(duration: 0.3), value: isFlat)
+        .animation(.easeOut(duration: 0.3), value: isDimmed)
     }
 
     private func bars(pulseTime: TimeInterval?) -> some View {
@@ -879,7 +870,7 @@ struct CompactWaveformView: View {
     }
 
     private func amplitude(for index: Int, pulseTime: TimeInterval?) -> CGFloat {
-        guard !isSettled else { return 0 }
+        guard !isFlat else { return 0 }
         let level = CGFloat(max(audioLevel, 0))
         let base = min(level * Self.multipliers[index], 1.0)
         guard let pulseTime else { return base }
@@ -925,34 +916,6 @@ struct ProcessingSpinner: View {
     }
 }
 
-struct InitializingDotsView: View {
-    @State private var activeDot = 0
-    @State private var timer: Timer?
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ForEach(0..<3, id: \.self) { index in
-                Circle()
-                    .fill(.white.opacity(activeDot == index ? 0.9 : 0.25))
-                    .frame(width: 4.5, height: 4.5)
-                    .animation(.easeInOut(duration: 0.4), value: activeDot)
-            }
-        }
-        .onAppear {
-            timer?.invalidate()
-            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-                DispatchQueue.main.async {
-                    activeDot = (activeDot + 1) % 3
-                }
-            }
-        }
-        .onDisappear {
-            timer?.invalidate()
-            timer = nil
-        }
-    }
-}
-
 struct RecordingOverlayView: View {
     @ObservedObject var state: RecordingOverlayState
     let onStopButtonPressed: () -> Void
@@ -980,10 +943,7 @@ struct RecordingOverlayView: View {
             } else {
                 ZStack {
                     Group {
-                        if state.phase == .initializing {
-                            InitializingDotsView()
-                                .transition(.opacity)
-                        } else if state.showsRecordingLayout {
+                        if state.showsRecordingLayout {
                             if state.showsRecordingTimer, let start = state.recordingStartedAt {
                                 RecordingElapsedTimeView(start: start, end: state.recordingStoppedAt)
                                     .transition(.opacity)
@@ -991,7 +951,8 @@ struct RecordingOverlayView: View {
                                 WaveformView(
                                     audioLevel: state.audioLevel,
                                     showsActivityPulse: true,
-                                    isSettled: state.isProcessing
+                                    isFlat: state.isAwaitingAudio || state.isProcessing,
+                                    isDimmed: state.isProcessing
                                 )
                                 .transition(.opacity)
                             }
@@ -1013,7 +974,8 @@ struct RecordingOverlayView: View {
                                     WaveformView(
                                         audioLevel: state.audioLevel,
                                         showsActivityPulse: true,
-                                        isSettled: state.isProcessing
+                                        isFlat: state.isAwaitingAudio || state.isProcessing,
+                                        isDimmed: state.isProcessing
                                     )
                                 }
                                 .transition(.opacity)
@@ -1084,8 +1046,6 @@ struct BottomPillOverlayView: View {
             return min(420, max(180, CGFloat(message.count) * 6.8 + 60))
         case .updateAvailable:
             return 150
-        case .initializing:
-            return horizontalPadding * 2 + waveformSize.width
         case .recording, .transcribing:
             var content = waveformSize.width
             if state.isCommandMode { content += commandIndicatorWidth + itemSpacing }
@@ -1115,9 +1075,6 @@ struct BottomPillOverlayView: View {
             case .updateAvailable:
                 UpdateAvailableOverlayView(onPress: onUpdateOverlayPressed)
                     .padding(.horizontal, Self.horizontalPadding)
-            case .initializing:
-                InitializingDotsView()
-                    .transition(.opacity)
             case .recording, .transcribing:
                 recordingContent
                     .transition(.opacity)
@@ -1140,7 +1097,8 @@ struct BottomPillOverlayView: View {
                 WaveformView(
                     audioLevel: state.audioLevel,
                     showsActivityPulse: true,
-                    isSettled: state.isProcessing
+                    isFlat: state.isAwaitingAudio || state.isProcessing,
+                    isDimmed: state.isProcessing
                 )
                 .scaleEffect(0.72)
                 .frame(width: Self.waveformSize.width, height: Self.waveformSize.height)
