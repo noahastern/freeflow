@@ -1163,6 +1163,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
         )
     }
 
+    /// The main provider as a transcription fallback. Nil unless a separate
+    /// transcription endpoint or key is configured, or when the main provider
+    /// cannot be used.
+    func makeMainProviderTranscriptionFallback() -> TranscriptionService? {
+        guard resolvedTranscriptionBaseURL != apiBaseURL || resolvedTranscriptionAPIKey != apiKey,
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return try? TranscriptionService(
+            apiKey: apiKey,
+            baseURL: apiBaseURL,
+            transcriptionModel: transcriptionModel,
+            language: resolvedTranscriptionLanguage
+        )
+    }
+
     private var resolvedTranscriptionLanguage: String? {
         let normalized = Self.normalizeTranscriptionLanguage(transcriptionLanguage)
         return normalized.isEmpty ? nil : normalized
@@ -1325,8 +1341,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         Task {
             do {
-                let transcriptionService = try makeTranscriptionService()
-                let rawTranscript = try await transcriptionService.transcribe(fileURL: audioURL)
+                let rawTranscript = try await Self.resolveRawTranscript(
+                    realtimeService: nil,
+                    fileService: try makeTranscriptionService(),
+                    mainProviderFallback: makeMainProviderTranscriptionFallback(),
+                    fileURL: audioURL
+                )
                 let parsedTranscript = Self.parseTranscriptCommands(
                     from: rawTranscript,
                     pressEnterCommandEnabled: self.isPressEnterVoiceCommandEnabled
@@ -2776,31 +2796,47 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// How long after stop a realtime socket that has not heard from its
+    /// server gets before it is treated as unreachable.
+    private static let realtimeServerContactGrace: TimeInterval = 1.5
+
     /// Await the realtime WebSocket's final transcript. If it errors out (or
-    /// was never started) fall back to the file-based POST so the user still
-    /// gets a transcript. Runs the realtime commit and file upload in that
-    /// strict order to avoid paying for both when realtime succeeds.
+    /// was never started) fall back to the file-based POST, then to the main
+    /// provider when a separate transcription endpoint is configured, so the
+    /// user still gets a transcript. Runs the steps in that strict order to
+    /// avoid paying for more than one when the first succeeds.
     private static func resolveRawTranscript(
         realtimeService: RealtimeTranscriptionService?,
         fileService: TranscriptionService,
+        mainProviderFallback: TranscriptionService?,
         fileURL: URL
     ) async throws -> String {
+        var realtime: (() async throws -> String)?
         if let realtimeService {
-            do {
-                try Task.checkCancellation()
+            realtime = {
+                guard await realtimeService.waitForServerEvent(timeout: realtimeServerContactGrace) else {
+                    throw RealtimeTranscriptionError.notConnected
+                }
                 return try await withTaskCancellationHandler {
                     try await realtimeService.commitAndAwaitFinal()
                 } onCancel: {
                     realtimeService.cancel()
                 }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                try Task.checkCancellation()
-                return try await fileService.transcribe(fileURL: fileURL)
             }
         }
-        return try await fileService.transcribe(fileURL: fileURL)
+        var mainProvider: (() async throws -> String)?
+        if let mainProviderFallback {
+            mainProvider = { try await mainProviderFallback.transcribe(fileURL: fileURL) }
+        }
+        let resolver = RawTranscriptResolver(
+            realtime: realtime,
+            realtimeReachedServer: { realtimeService?.hasReceivedServerEvent ?? false },
+            transcriptionEndpoint: { try await fileService.transcribe(fileURL: fileURL) },
+            mainProvider: mainProvider
+        )
+        return try await resolver.resolve { source in
+            os_log(.info, log: recordingLog, "raw transcript falling back to %{public}@", String(describing: source))
+        }.transcript
     }
 
     private func stopAndTranscribe() {
@@ -2894,6 +2930,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     async let transcript = Self.resolveRawTranscript(
                         realtimeService: activeRealtime,
                         fileService: transcriptionService,
+                        mainProviderFallback: self.makeMainProviderTranscriptionFallback(),
                         fileURL: transcriptionFileURL
                     )
                     let rawTranscript = try await transcript
