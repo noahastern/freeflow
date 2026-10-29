@@ -3,6 +3,7 @@ import Foundation
 @main
 struct FreeFlowTests {
     static func main() async {
+        AlertSoundPreferenceTests.run()
         AppContextServiceTests.run()
         await LLMAPITransportTests.run()
         TemperatureCapabilityCacheTests.run()

@@ -559,6 +559,18 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var startSound: String {
+        didSet {
+            UserDefaults.standard.set(startSound, forKey: AlertSoundSlot.start.storageKey)
+        }
+    }
+
+    @Published var stopSound: String {
+        didSet {
+            UserDefaults.standard.set(stopSound, forKey: AlertSoundSlot.stop.storageKey)
+        }
+    }
+
     private var precomputedMacros: [PrecomputedMacro] = []
 
     @Published var voiceMacros: [VoiceMacro] = [] {
@@ -810,6 +822,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.isPressEnterVoiceCommandEnabled = isPressEnterVoiceCommandEnabled
         self.alertSoundsEnabled = alertSoundsEnabled
         self.soundVolume = soundVolume
+        self.startSound = AlertSoundSlot.start.load(from: .standard)
+        self.stopSound = AlertSoundSlot.stop.load(from: .standard)
         self.voiceMacros = initialMacros
         self.pipelineHistory = savedHistory
         self.hasAccessibility = initialAccessibility
@@ -2353,7 +2367,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 )
             }
             overlayShown = true
-            self.playAlertSound(named: "Tink")
+            self.playAlertSound(named: self.startSound)
         }
         audioRecorder.onRecordingFailure = { [weak self] error in
             DispatchQueue.main.async {
@@ -2536,7 +2550,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     func playAlertSound(named name: String) {
         guard alertSoundsEnabled else { return }
 
-        let sound = NSSound(named: name)
+        let sound = AlertSoundLibrary.isFilePath(name)
+            ? NSSound(contentsOf: URL(fileURLWithPath: name), byReference: true)
+            : NSSound(named: name)
         sound?.volume = soundVolume
         sound?.play()
     }
@@ -2730,7 +2746,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         isTranscribing = true
         statusText = "Preparing audio..."
         errorMessage = nil
-        playAlertSound(named: "Pop")
+        playAlertSound(named: stopSound)
         overlayManager.showTranscribing()
         audioRecorder.stopRecording { [weak self] fileURL in
             guard let self else { return }

@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import ServiceManagement
+import UniformTypeIdentifiers
 
 // MARK: - Shared Helpers
 
@@ -534,6 +535,7 @@ struct GeneralSettingsView: View {
     @FocusState private var customVocabularyFocused: Bool
     @State private var micPermissionGranted = false
     @State private var showMutedHint = false
+    @State private var availableSoundNames: [String] = []
     @State private var copiedBuildInfo = false
     @State private var copiedBuildInfoResetWorkItem: DispatchWorkItem?
     @StateObject private var githubCache = GitHubMetadataCache.shared
@@ -1377,33 +1379,90 @@ struct GeneralSettingsView: View {
             .disabled(!appState.alertSoundsEnabled)
             .opacity(appState.alertSoundsEnabled ? 1 : 0.5)
 
-            HStack(spacing: 8) {
-                Button("Preview") {
-                    let muted = SystemAudioStatus.isDefaultOutputMuted()
-                    let volume = SystemAudioStatus.defaultOutputVolume()
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showMutedHint = muted || (volume ?? 1) < 0.10
-                    }
-                    appState.playAlertSound(named: "Tink")
+            Group {
+                soundPickerRow(.start, choice: $appState.startSound)
+                soundPickerRow(.stop, choice: $appState.stopSound)
+            }
+            .disabled(!appState.alertSoundsEnabled)
+            .opacity(appState.alertSoundsEnabled ? 1 : 0.5)
+
+            if showMutedHint {
+                HStack(spacing: 4) {
+                    Image(systemName: "speaker.slash.fill")
+                        .foregroundStyle(.orange)
+                    Text("System volume is muted or very low. Unmute to hear the preview.")
+                        .foregroundStyle(.secondary)
                 }
                 .font(.caption)
-                .disabled(!appState.alertSoundsEnabled)
-
-                if showMutedHint {
-                    HStack(spacing: 4) {
-                        Image(systemName: "speaker.slash.fill")
-                            .foregroundStyle(.orange)
-                        Text("System volume is muted or very low. Unmute to hear the preview.")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.caption)
-                    .transition(.opacity)
-                }
+                .transition(.opacity)
             }
+        }
+        .onAppear {
+            availableSoundNames = AlertSoundLibrary.soundNames()
         }
         .onChange(of: appState.alertSoundsEnabled) { enabled in
             if !enabled { showMutedHint = false }
         }
+    }
+
+    private static let chooseSoundFileTag = "__choose_sound_file__"
+
+    private func soundPickerRow(_ slot: AlertSoundSlot, choice: Binding<String>) -> some View {
+        let selection = Binding<String>(
+            get: { choice.wrappedValue },
+            set: { newValue in
+                if newValue == Self.chooseSoundFileTag {
+                    if let path = chooseSoundFile() {
+                        choice.wrappedValue = path
+                        previewSound(path)
+                    }
+                } else {
+                    choice.wrappedValue = newValue
+                    previewSound(newValue)
+                }
+            }
+        )
+        var options = availableSoundNames
+        if !options.contains(choice.wrappedValue) {
+            options.insert(choice.wrappedValue, at: 0)
+        }
+
+        return HStack(spacing: 8) {
+            Picker(slot.title, selection: selection) {
+                ForEach(options, id: \.self) { name in
+                    Text(AlertSoundLibrary.displayName(for: name)).tag(name)
+                }
+                Divider()
+                Text("Choose File…").tag(Self.chooseSoundFileTag)
+            }
+            .pickerStyle(.menu)
+
+            Button {
+                previewSound(choice.wrappedValue)
+            } label: {
+                Image(systemName: "play.fill")
+            }
+            .help("Preview \(slot.title.lowercased())")
+        }
+    }
+
+    private func previewSound(_ choice: String) {
+        let muted = SystemAudioStatus.isDefaultOutputMuted()
+        let volume = SystemAudioStatus.defaultOutputVolume()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showMutedHint = muted || (volume ?? 1) < 0.10
+        }
+        appState.playAlertSound(named: choice)
+    }
+
+    private func chooseSoundFile() -> String? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "Choose a sound file"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url.path
     }
 
     // MARK: Custom Vocabulary
