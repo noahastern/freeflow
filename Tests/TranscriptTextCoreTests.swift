@@ -9,6 +9,7 @@ enum TranscriptTextCoreTests {
         testPossibleRealSpeechIsPreserved()
         testPostProcessedTranscriptSanitization()
         testModeSpecificSanitization()
+        testPlainTypography()
         testInstructionExecutionGuard()
     }
 
@@ -87,6 +88,34 @@ enum TranscriptTextCoreTests {
         TestSupport.expectEqual(TranscriptOutputSanitizer.postProcessedTranscript("\"EMPTY\""), "")
         TestSupport.expectEqual(TranscriptOutputSanitizer.postProcessedTranscript("empty"), "empty")
         TestSupport.expectEqual(TranscriptOutputSanitizer.postProcessedTranscript("  \n "), "")
+    }
+
+    // Regression: gpt-oss-20b returned non-breaking hyphens, em dashes, and
+    // curly quotes that the cleanup prompt never asks for.
+    private static func testPlainTypography() {
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.plainTypography(
+                "A trigger\u{2011}happy model\u{2014} it said \u{201C}don\u{2019}t\u{201D}.",
+                rawTranscript: "a trigger happy model it said don't"
+            ),
+            "A trigger-happy model, it said \"don't\"."
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.plainTypography("one \u{2014} two\u{2014}three", rawTranscript: "one two three"),
+            "one, two, three"
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.plainTypography("Use an em dash\u{2014}here.", rawTranscript: "use an em dash dash here"),
+            "Use an em dash\u{2014}here."
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.plainTypography("Er sagte \u{201E}Hallo\u{201C}.", rawTranscript: "er sagte hallo"),
+            "Er sagte \u{201E}Hallo\u{201C}."
+        )
+        TestSupport.expectEqual(
+            TranscriptOutputSanitizer.plainTypography("Ranges like 3\u{2013}5 stay.", rawTranscript: "ranges like three to five stay"),
+            "Ranges like 3\u{2013}5 stay."
+        )
     }
 
     private static func testModeSpecificSanitization() {

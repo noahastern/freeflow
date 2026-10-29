@@ -74,16 +74,19 @@ Filler and speech habits:
 - Example of required behavior:
   - "um so basically I was like thinking we could uh you know move the launch to next week or something" -> "I was thinking we could move the launch to next week."
 
-Self-corrections are strict:
-- If the speaker says an initial version and then corrects it, output only the final corrected version.
-- Delete both the correction marker and the abandoned earlier wording.
-- This applies across languages, including patterns like "no actually", "sorry", "wait", "I mean", "scratch that", "or rather", "let me rephrase", Romanian "nu", "nu stai", "de fapt", Spanish "no", "perdón", French "non".
-- "Actually" used for emphasis or contrast is not a correction.
+Self-corrections replace only what they correct:
+- If the speaker says something and then corrects it, keep the corrected version and delete the correction marker and the abandoned wording.
+- A correction replaces only the part it corrects: a word, a phrase, or at most the sentence just before the marker. Keep every other sentence, including background, reasoning, and remarks before and after the correction.
+- When the speaker thinks out loud, checks something, and then reverses an earlier decision, keep the reasoning and the final decision, and drop only the decision they abandoned.
+- Never reduce a dictation of several sentences to its last sentence because it contains a correction.
+- Correction markers in any language include "no actually", "sorry", "wait", "I mean", "scratch that", "or rather", "let me rephrase", Romanian "nu", "nu stai", "de fapt", Spanish "no", "perdón", French "non".
+- "Actually" used for emphasis or contrast is not a correction. "Sorry" as an apology is not a correction.
 - Examples of required behavior:
   - "Thursday, no actually Wednesday" -> "Wednesday"
   - "let's meet Thursday no actually Wednesday after lunch" -> "Let's meet Wednesday after lunch."
   - "send it to John wait to Sarah" -> "Send it to Sarah."
-  - "can we meet on Tuesday scratch that I'd rather meet Wednesday" -> "I'd rather meet Wednesday."
+  - "the demo went well can we meet on Tuesday scratch that I'd rather meet Wednesday" -> "The demo went well. I'd rather meet Wednesday."
+  - "let's drop the old parser and keep the new one it's nice that the tests are this fast let me check which one I'm on yeah I'm on the old parser sorry keep the old parser and drop the new one since it adds nothing" -> "It's nice that the tests are this fast. Let me check which one I'm on. I'm on the old parser. Keep the old parser and drop the new one, since it adds nothing."
   - "lo mando mañana, no perdón, pasado mañana" -> "Lo mando pasado mañana."
   - "pot să trimit mâine, de fapt poimâine dimineață" -> "Pot să trimit poimâine dimineață."
 
@@ -674,7 +677,10 @@ Model: \(model)
             throw PostProcessingError.emptyOutput
         }
 
-        let sanitizedTranscript = TranscriptOutputSanitizer.postProcessedTranscript(content)
+        let sanitizedTranscript = TranscriptOutputSanitizer.plainTypography(
+            TranscriptOutputSanitizer.postProcessedTranscript(content),
+            rawTranscript: transcript
+        )
         if instructionExecutionGuardEnabled && TranscriptOutputSanitizer.appearsToHaveExecutedInstruction(
             rawTranscript: transcript,
             cleanedTranscript: sanitizedTranscript,

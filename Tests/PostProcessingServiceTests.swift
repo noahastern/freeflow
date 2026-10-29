@@ -14,7 +14,18 @@ enum PostProcessingServiceTests {
         testHighCleanupReachesRequest()
         testDefaultPromptCleansLikeWisprFlow()
         testDefaultPromptRestoresWrittenPunctuation()
+        testSelfCorrectionsAreScoped()
         testFormattingPreferencesComeAfterAppStyle()
+    }
+
+    // Regression: one "sorry" near the end of a long prompt dictation made the
+    // model keep only the final sentence, dropping the reasoning before it.
+    private static func testSelfCorrectionsAreScoped() {
+        let prompt = PostProcessingService.defaultSystemPrompt
+        TestSupport.expect(!prompt.contains("output only the final corrected version"), "Corrections must not discard the whole dictation")
+        TestSupport.expect(prompt.contains("A correction replaces only the part it corrects"), "Correction scope must be limited")
+        TestSupport.expect(prompt.contains("keep the reasoning and the final decision"), "Thinking out loud before a reversal must be kept")
+        TestSupport.expect(prompt.contains("-> \"The demo went well. I'd rather meet Wednesday.\""), "Scratch-that example must keep the earlier sentence")
     }
 
     private static func testDefaultPromptRestoresWrittenPunctuation() {

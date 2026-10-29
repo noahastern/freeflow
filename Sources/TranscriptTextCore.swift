@@ -121,6 +121,41 @@ enum TranscriptOutputSanitizer {
         return result
     }
 
+    // Some cleanup models emit typographic characters the prompt does not ask
+    // for. Non-breaking hyphens look like "-" but break search and pasted code,
+    // and em dashes are forbidden unless the speaker dictated a dash.
+    static func plainTypography(_ value: String, rawTranscript: String) -> String {
+        var result = value
+            .replacingOccurrences(of: "\u{2011}", with: "-")
+            .replacingOccurrences(of: "\u{2010}", with: "-")
+
+        let speakerDictatedDash = rawTranscript.range(
+            of: #"(?i)\bdash\b"#,
+            options: .regularExpression
+        ) != nil
+        if !speakerDictatedDash {
+            result = result.replacingOccurrences(
+                of: #"(?<=\S)[ \t]*\x{2014}[ \t]*(?=\S)"#,
+                with: ", ",
+                options: .regularExpression
+            )
+        }
+
+        // Low-opening quote styles (German, Polish, French guillemets) pair
+        // with curly closers, so leave those texts alone.
+        let usesLocaleQuotes = result.unicodeScalars.contains { scalar in
+            ["\u{201E}", "\u{201A}", "\u{00AB}", "\u{00BB}"].contains(scalar)
+        }
+        if !usesLocaleQuotes {
+            result = result
+                .replacingOccurrences(of: "\u{201C}", with: "\"")
+                .replacingOccurrences(of: "\u{201D}", with: "\"")
+                .replacingOccurrences(of: "\u{2018}", with: "'")
+                .replacingOccurrences(of: "\u{2019}", with: "'")
+        }
+        return result
+    }
+
     static func commandModeTranscript(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
