@@ -13,6 +13,12 @@ final class RecordingOverlayState: ObservableObject {
     @Published var updateVersion: String = ""
     @Published var errorMessage: String?
     @Published var toastID: UUID?
+
+    /// Tap-to-toggle recordings show a discard X and a finish checkmark;
+    /// the panel only accepts clicks in that mode.
+    var showsSessionControls: Bool {
+        phase == .recording && recordingTriggerMode == .toggle
+    }
 }
 
 enum OverlayPhase {
@@ -49,7 +55,7 @@ private func makeOverlayPanel(width: CGFloat, height: CGFloat) -> NSPanel {
     panel.hasShadow = true
     panel.level = .screenSaver
     panel.ignoresMouseEvents = true
-    panel.collectionBehavior = [.canJoinAllSpaces]
+    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     panel.isReleasedWhenClosed = false
     panel.hidesOnDeactivate = false
     return panel
@@ -72,14 +78,79 @@ private func makeNotchContent<V: View>(
     return hosting
 }
 
+private func makeFloatingContent<V: View>(width: CGFloat, height: CGFloat, rootView: V) -> NSView {
+    let shaped = rootView
+        .frame(width: width, height: height)
+        .background(Color.black)
+        .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
+
+    let hosting = NSHostingView(rootView: shaped)
+    hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
+    hosting.autoresizingMask = [.width, .height]
+    return hosting
+}
+
+/// Filled circular button with a dark glyph, used for the discard X and
+/// the finish checkmark at opposite ends of the overlay.
+private struct RecordingControlButton: View {
+    let systemName: String
+    let diameter: CGFloat
+    let fill: Color
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: diameter * 0.5, weight: .bold))
+                .foregroundStyle(Color.black)
+                .frame(width: diameter, height: diameter)
+                .background(Circle().fill(fill))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct DiscardRecordingButton: View {
+    let diameter: CGFloat
+    let action: () -> Void
+
+    var body: some View {
+        RecordingControlButton(
+            systemName: "xmark",
+            diameter: diameter,
+            fill: Color(white: 0.72),
+            accessibilityLabel: "Discard recording",
+            action: action
+        )
+    }
+}
+
+private struct FinishRecordingButton: View {
+    let diameter: CGFloat
+    let action: () -> Void
+
+    var body: some View {
+        RecordingControlButton(
+            systemName: "checkmark",
+            diameter: diameter,
+            fill: Color.white,
+            accessibilityLabel: "Finish recording",
+            action: action
+        )
+    }
+}
+
 // MARK: - Manager
 
 final class RecordingOverlayManager {
     private var overlayWindow: NSPanel?
     private let overlayState = RecordingOverlayState()
     private var lockedOverlayWidth: CGFloat?
-
     var onStopButtonPressed: (() -> Void)?
+    var onCancelButtonPressed: (() -> Void)?
     var onUpdateOverlayPressed: (() -> Void)?
 
     /// The screen the overlay should drop down on. The user picks one of
@@ -108,8 +179,14 @@ final class RecordingOverlayManager {
         }
     }
 
+    private var placement: OverlayPlacement {
+        OverlayPlacementPreference.load(from: .standard)
+    }
+
+    /// The bottom pill floats free of the menu bar, so notch geometry
+    /// only applies to the top placements.
     private var screenHasNotch: Bool {
-        guard let screen = targetScreen else { return false }
+        guard placement != .bottom, let screen = targetScreen else { return false }
         return screen.safeAreaInsets.top > 0
     }
 
@@ -278,6 +355,23 @@ final class RecordingOverlayManager {
 
         guard let screen = targetScreen else { return }
 
+        if placement == .bottom {
+            // Rise and fade in from slightly below the resting position.
+            panel.setFrame(frame.offsetBy(dx: 0, dy: -12), display: true)
+            panel.alphaValue = 0
+            panel.orderFrontRegardless()
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.34, 1.56, 0.64, 1.0)
+                panel.animator().setFrame(frame, display: true)
+                panel.animator().alphaValue = 1
+            }
+
+            overlayWindow = panel
+            return
+        }
+
         let hiddenFrame = NSRect(x: frame.origin.x, y: screen.frame.maxY, width: frame.width, height: frame.height)
         panel.setFrame(hiddenFrame, display: true)
         panel.alphaValue = 1
@@ -307,6 +401,13 @@ final class RecordingOverlayManager {
     }
 
     private func makeOverlayContent(frame: NSRect) -> NSView {
+        let onStopButtonPressed: () -> Void = { [weak self] in
+            self?.onStopButtonPressed?()
+        }
+        let onCancelButtonPressed: () -> Void = { [weak self] in
+            self?.onCancelButtonPressed?()
+        }
+
         if useWingedLayout {
             // Winged layout: notch x-range stays solid black so the cutout masks it.
             let rootView = WingedRecordingView(
@@ -315,15 +416,29 @@ final class RecordingOverlayManager {
                 notchWidth: notchWidth,
                 rightWingWidth: activeWingWidth,
                 height: frame.height,
-                onStopButtonPressed: { [weak self] in
-                    self?.onStopButtonPressed?()
-                }
+                onStopButtonPressed: onStopButtonPressed,
+                onCancelButtonPressed: onCancelButtonPressed
             )
             return makeNotchContent(
                 width: frame.width,
                 height: frame.height,
                 cornerRadius: 14,
                 rootView: AnyView(rootView)
+            )
+        }
+
+        if placement == .bottom {
+            return makeFloatingContent(
+                width: frame.width,
+                height: frame.height,
+                rootView: BottomPillOverlayView(
+                    state: overlayState,
+                    onStopButtonPressed: onStopButtonPressed,
+                    onCancelButtonPressed: onCancelButtonPressed,
+                    onUpdateOverlayPressed: { [weak self] in
+                        self?.onUpdateOverlayPressed?()
+                    }
+                )
             )
         }
 
@@ -334,9 +449,8 @@ final class RecordingOverlayManager {
             rootView: AnyView(
                 RecordingOverlayView(
                     state: overlayState,
-                    onStopButtonPressed: { [weak self] in
-                        self?.onStopButtonPressed?()
-                    },
+                    onStopButtonPressed: onStopButtonPressed,
+                    onCancelButtonPressed: onCancelButtonPressed,
                     onUpdateOverlayPressed: { [weak self] in
                         self?.onUpdateOverlayPressed?()
                     }
@@ -360,12 +474,10 @@ final class RecordingOverlayManager {
     }
 
     /// True iff the overlay renders as wings flanking the notch (notched display
-    /// + use_compact_overlay on). updateAvailable and error toasts still use
+    /// + menu-bar placement). updateAvailable and error toasts still use
     /// the drop-down pill.
     private var useWingedLayout: Bool {
-        guard screenHasNotch else { return false }
-        let useCompact = (UserDefaults.standard.object(forKey: "use_compact_overlay") as? Bool) ?? true
-        guard useCompact else { return false }
+        guard screenHasNotch, placement == .menuBar else { return false }
         switch overlayState.phase {
         case .recording, .initializing, .transcribing:
             return true
@@ -377,9 +489,11 @@ final class RecordingOverlayManager {
     }
 
     /// Equal wings keep the overlay balanced around the camera cutout.
-    /// Recording needs just enough room for the timer on the left.
+    /// Recording needs just enough room for the timer on the left, plus
+    /// the X and checkmark at the outer edges in tap-to-toggle mode.
     private var activeWingWidth: CGFloat {
-        overlayState.phase == .recording && overlayState.showsRecordingTimer ? 48 : 36
+        let base: CGFloat = overlayState.phase == .recording && overlayState.showsRecordingTimer ? 48 : 36
+        return overlayState.showsSessionControls ? base + 22 : base
     }
 
     private var overlayFrame: NSRect {
@@ -401,7 +515,15 @@ final class RecordingOverlayManager {
         }
 
         let width = overlayWidth
-        let useCompact = (UserDefaults.standard.object(forKey: "use_compact_overlay") as? Bool) ?? true
+
+        if placement == .bottom {
+            return OverlayPlacementPreference.bottomFrame(
+                size: CGSize(width: width, height: BottomPillOverlayView.height),
+                screenFrame: screen.frame
+            )
+        }
+
+        let useCompact = placement == .menuBar
         let forceDropDownPill = overlayState.phase == .feedback
             && !(overlayState.errorMessage?.isEmpty ?? true)
         // Compact mode: overlay sits flush with the menu bar on every display.
@@ -421,6 +543,10 @@ final class RecordingOverlayManager {
     private var overlayWidth: CGFloat {
         if let lockedOverlayWidth, overlayState.phase == .transcribing {
             return lockedOverlayWidth
+        }
+
+        if placement == .bottom {
+            return BottomPillOverlayView.width(for: overlayState)
         }
 
         if overlayState.phase == .feedback {
@@ -448,21 +574,29 @@ final class RecordingOverlayManager {
         }
 
         let commandModeWidth: CGFloat = 180
-        let toggleWidth: CGFloat = 150
+        let toggleWidth: CGFloat = 132
         let defaultWidth: CGFloat = 92
         let baseWidth: CGFloat
 
         if overlayState.isCommandMode {
             baseWidth = commandModeWidth
-        } else if overlayState.phase == .recording && overlayState.recordingTriggerMode == .toggle {
+        } else if overlayState.showsSessionControls {
             baseWidth = toggleWidth
         } else {
             baseWidth = defaultWidth
         }
 
         // Reserve separate leading, center, and trailing slots while recording.
+        // The X joins the leading slot in tap-to-toggle mode, so the slots
+        // on both sides of the centered timer need more room.
+        let timerWidth: CGFloat
+        if overlayState.showsSessionControls {
+            timerWidth = overlayState.isCommandMode ? 260 : 216
+        } else {
+            timerWidth = overlayState.isCommandMode ? 224 : 180
+        }
         let width = overlayState.phase == .recording && overlayState.showsRecordingTimer
-            ? max(baseWidth, overlayState.isCommandMode ? 224 : 180)
+            ? max(baseWidth, timerWidth)
             : baseWidth
         guard screenHasNotch else { return width }
         return max(notchWidth, width)
@@ -502,13 +636,13 @@ struct WingedRecordingView: View {
     let rightWingWidth: CGFloat
     let height: CGFloat
     let onStopButtonPressed: () -> Void
+    let onCancelButtonPressed: () -> Void
+
+    private let controlDiameter: CGFloat = 16
+    private let controlEdgeInset: CGFloat = 8
 
     private var showsLiveRecordingContent: Bool {
         state.phase == .recording
-    }
-
-    private var showsStopButton: Bool {
-        showsLiveRecordingContent && state.recordingTriggerMode == .toggle
     }
 
     var body: some View {
@@ -521,6 +655,11 @@ struct WingedRecordingView: View {
         HStack(spacing: 0) {
             // Left wing — empty during feedback so the right-wing X reads as the sole signal.
             HStack(spacing: 0) {
+                if state.showsSessionControls {
+                    DiscardRecordingButton(diameter: controlDiameter, action: onCancelButtonPressed)
+                        .padding(.leading, controlEdgeInset)
+                        .transition(.opacity)
+                }
                 Spacer(minLength: 0)
                 Group {
                     if state.phase == .feedback {
@@ -559,30 +698,23 @@ struct WingedRecordingView: View {
             Color.black
                 .frame(width: notchWidth, height: height)
 
-            // Right wing — stop button or failure X, horizontally centered.
-            HStack {
+            // Right wing — finish checkmark at the outer edge, mirroring the
+            // X, or the failure X centered.
+            HStack(spacing: 0) {
                 Spacer(minLength: 0)
-                Group {
-                    if state.phase == .feedback {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 7, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 14, height: 14)
-                            .background(Circle().fill(Color.red.opacity(0.92)))
-                            .transition(.opacity)
-                    } else if showsStopButton {
-                        Button(action: onStopButtonPressed) {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 7, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 14, height: 14)
-                                .background(Circle().fill(Color.red.opacity(0.92)))
-                        }
-                        .buttonStyle(.plain)
+                if state.phase == .feedback {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 14, height: 14)
+                        .background(Circle().fill(Color.red.opacity(0.92)))
                         .transition(.opacity)
-                    }
+                    Spacer(minLength: 0)
+                } else if state.showsSessionControls {
+                    FinishRecordingButton(diameter: controlDiameter, action: onStopButtonPressed)
+                        .padding(.trailing, controlEdgeInset)
+                        .transition(.opacity)
                 }
-                Spacer(minLength: 0)
             }
             .frame(width: rightWingWidth, height: height)
         }
@@ -959,20 +1091,21 @@ struct InitializingDotsView: View {
 struct RecordingOverlayView: View {
     @ObservedObject var state: RecordingOverlayState
     let onStopButtonPressed: () -> Void
+    let onCancelButtonPressed: () -> Void
     let onUpdateOverlayPressed: () -> Void
 
+    private let controlDiameter: CGFloat = 16
+
     private var leadingAccessoryWidth: CGFloat {
-        guard showsLiveRecordingContent && state.showsRecordingTimer else { return 24 }
-        return state.isCommandMode ? 72 : 48
+        let width: CGFloat = showsLiveRecordingContent && state.showsRecordingTimer
+            ? (state.isCommandMode ? 72 : 48)
+            : 24
+        return state.showsSessionControls ? width + controlDiameter + 6 : width
     }
     private let trailingAccessoryWidth: CGFloat = 32
 
     private var showsLiveRecordingContent: Bool {
         state.phase == .recording
-    }
-
-    private var showsStopButton: Bool {
-        showsLiveRecordingContent && state.recordingTriggerMode == .toggle
     }
 
     var body: some View {
@@ -1004,7 +1137,11 @@ struct RecordingOverlayView: View {
                     }
 
                     HStack {
-                        Group {
+                        HStack(spacing: 6) {
+                            if state.showsSessionControls {
+                                DiscardRecordingButton(diameter: controlDiameter, action: onCancelButtonPressed)
+                                    .transition(.opacity)
+                            }
                             if showsLiveRecordingContent && state.showsRecordingTimer {
                                 HStack(spacing: 6) {
                                     if state.isCommandMode {
@@ -1021,22 +1158,18 @@ struct RecordingOverlayView: View {
                                     .transition(.opacity)
                             }
                         }
-                        .frame(width: leadingAccessoryWidth, alignment: .center)
+                        .frame(
+                            width: leadingAccessoryWidth,
+                            alignment: state.showsSessionControls ? .leading : .center
+                        )
                         .frame(maxHeight: .infinity, alignment: .center)
 
                         Spacer(minLength: 0)
 
                         Group {
-                            if showsStopButton {
-                                Button(action: onStopButtonPressed) {
-                                    Image(systemName: "stop.fill")
-                                        .font(.system(size: 7, weight: .bold))
-                                        .foregroundStyle(.white)
-                                        .frame(width: 14, height: 14)
-                                        .background(Circle().fill(Color.red.opacity(0.92)))
-                                }
-                                .buttonStyle(.plain)
-                                .transition(.move(edge: .trailing).combined(with: .opacity))
+                            if state.showsSessionControls {
+                                FinishRecordingButton(diameter: controlDiameter, action: onStopButtonPressed)
+                                    .transition(.opacity)
                             }
                         }
                         .frame(width: trailingAccessoryWidth, alignment: .trailing)
@@ -1049,6 +1182,102 @@ struct RecordingOverlayView: View {
         .animation(.spring(response: 0.28, dampingFraction: 1.0), value: state.phase)
         .animation(.spring(response: 0.28, dampingFraction: 1.0), value: state.recordingTriggerMode)
         .animation(.spring(response: 0.28, dampingFraction: 1.0), value: state.isCommandMode)
+    }
+}
+
+// MARK: - Bottom Pill View
+
+/// Small floating pill: just the waveform, flanked by a discard X and a
+/// finish checkmark in tap-to-toggle mode.
+struct BottomPillOverlayView: View {
+    @ObservedObject var state: RecordingOverlayState
+    let onStopButtonPressed: () -> Void
+    let onCancelButtonPressed: () -> Void
+    let onUpdateOverlayPressed: () -> Void
+
+    static let height: CGFloat = 28
+    private static let horizontalPadding: CGFloat = 12
+    private static let waveformSize = CGSize(width: 34, height: 18)
+    private static let itemSpacing: CGFloat = 6
+    /// Wider gap between each control and the waveform.
+    private static let controlSpacing: CGFloat = 10
+    private static let controlDiameter: CGFloat = 20
+    /// Keeps each control concentric with the capsule's rounded end.
+    private static let controlEdgePadding: CGFloat = (height - controlDiameter) / 2
+    private static let commandIndicatorWidth: CGFloat = 16
+    private static let timerWidth: CGFloat = 40
+
+    /// Panel width for the current state; mirrors the layout in `body`.
+    static func width(for state: RecordingOverlayState) -> CGFloat {
+        switch state.phase {
+        case .feedback:
+            guard let message = state.errorMessage, !message.isEmpty else { return 60 }
+            return min(420, max(180, CGFloat(message.count) * 6.8 + 60))
+        case .updateAvailable:
+            return 150
+        case .initializing, .transcribing:
+            return horizontalPadding * 2 + waveformSize.width
+        case .recording:
+            var content = waveformSize.width
+            if state.isCommandMode { content += commandIndicatorWidth + itemSpacing }
+            if state.showsRecordingTimer { content += timerWidth + itemSpacing }
+            let side = state.showsSessionControls
+                ? controlEdgePadding + controlDiameter + controlSpacing
+                : horizontalPadding
+            return content + side * 2
+        }
+    }
+
+    var body: some View {
+        Group {
+            switch state.phase {
+            case .feedback:
+                if let message = state.errorMessage {
+                    ErrorOverlayView(message: message)
+                        .padding(.horizontal, Self.horizontalPadding)
+                } else {
+                    FailureIndicatorView()
+                }
+            case .updateAvailable:
+                UpdateAvailableOverlayView(onPress: onUpdateOverlayPressed)
+                    .padding(.horizontal, Self.horizontalPadding)
+            case .initializing:
+                InitializingDotsView()
+                    .transition(.opacity)
+            case .transcribing:
+                CompactProcessingIndicatorView()
+                    .transition(.opacity)
+            case .recording:
+                recordingContent
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.spring(response: 0.28, dampingFraction: 1.0), value: state.phase)
+    }
+
+    private var recordingContent: some View {
+        HStack(spacing: Self.controlSpacing) {
+            if state.showsSessionControls {
+                DiscardRecordingButton(diameter: Self.controlDiameter, action: onCancelButtonPressed)
+            }
+            HStack(spacing: Self.itemSpacing) {
+                if state.isCommandMode {
+                    CommandModeIndicator()
+                }
+                WaveformView(audioLevel: state.audioLevel, showsActivityPulse: true)
+                    .scaleEffect(0.72)
+                    .frame(width: Self.waveformSize.width, height: Self.waveformSize.height)
+                if state.showsRecordingTimer, let start = state.recordingStartedAt {
+                    RecordingElapsedTimeView(start: start)
+                }
+            }
+            if state.showsSessionControls {
+                FinishRecordingButton(diameter: Self.controlDiameter, action: onStopButtonPressed)
+            }
+        }
+        .padding(.horizontal, state.showsSessionControls ? Self.controlEdgePadding : Self.horizontalPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

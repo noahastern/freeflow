@@ -859,6 +859,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self?.handleOverlayStopButtonPressed()
             }
         }
+        overlayManager.onCancelButtonPressed = { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleOverlayCancelButtonPressed()
+            }
+        }
         overlayManager.onUpdateOverlayPressed = { [weak self] in
             DispatchQueue.main.async {
                 self?.handleUpdateOverlayPressed()
@@ -1864,6 +1869,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func handleEscapeKeyPress() -> Bool {
+        // Returning false lets Escape pass through to the focused app.
+        guard EscapeKeyPreference.load(from: .standard) == .discard else {
+            return false
+        }
+
         if isTranscribing {
             cancelTranscription()
             return true
@@ -1903,6 +1913,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func handleOverlayStopButtonPressed() {
         guard isRecording, activeRecordingTriggerMode == .toggle else { return }
         stopAndTranscribe()
+    }
+
+    private func handleOverlayCancelButtonPressed() {
+        guard isRecording, activeRecordingTriggerMode == .toggle else { return }
+        cancelToggleShortcutSession()
     }
 
     private func cancelToggleShortcutSession() {

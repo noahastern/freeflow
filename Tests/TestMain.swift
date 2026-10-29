@@ -8,6 +8,7 @@ struct FreeFlowTests {
         await LLMAPITransportTests.run()
         TemperatureCapabilityCacheTests.run()
         ModelConfigurationTests.run()
+        OverlayPlacementPreferenceTests.run()
         RecordingCaptureTimingTests.run()
         RecordingTimerPreferenceTests.run()
         OriginalFieldInsertionPreferenceTests.run()

@@ -102,7 +102,7 @@ struct SetupView: View {
     @State private var isCapturingToggleShortcut = false
     @State private var isCapturingCopyAgainShortcut = false
     @StateObject private var testHotkeyHarness = SetupTestHotkeyHarness()
-    @AppStorage("use_compact_overlay") private var useCompactOverlay = true
+    @AppStorage(OverlayPlacementPreference.storageKey) private var overlayPlacement = OverlayPlacementPreference.load(from: .standard)
 
     private let totalSteps: [SetupStep] = SetupStep.allCases
     private var isCapturingShortcut: Bool {
@@ -878,18 +878,7 @@ struct SetupView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 10) {
-                OverlayStyleOptionRow(
-                    title: "Minimalist menu-bar overlay",
-                    subtitle: "Two slim wings flank the camera notch and stay inside the menu bar. Never covers app tabs or toolbars.",
-                    isMinimalist: true,
-                    selection: $useCompactOverlay
-                )
-                OverlayStyleOptionRow(
-                    title: "Drop-down pill",
-                    subtitle: "Single pill hangs below the menu bar during recording. Larger and more visible, but covers a thin strip of whatever app is active.",
-                    isMinimalist: false,
-                    selection: $useCompactOverlay
-                )
+                OverlayPlacementOptionRows(selection: $overlayPlacement)
             }
             .padding(.top, 6)
         }
@@ -1535,7 +1524,7 @@ struct HowToRow: View {
 /// Mini visual preview of one overlay style for the setup-flow option cards.
 /// Stylized MacBook top edge with the recording UI drawn as wings or pill.
 struct OverlayStylePreview: View {
-    let isMinimalist: Bool
+    let placement: OverlayPlacement
 
     private let frameWidth: CGFloat = 110
     private let frameHeight: CGFloat = 56
@@ -1580,7 +1569,8 @@ struct OverlayStylePreview: View {
             .frame(width: notchWidth, height: notchHeight)
 
             // Style-specific overlay rendering.
-            if isMinimalist {
+            switch placement {
+            case .menuBar:
                 // Two slim wings flanking the notch, inside menu bar height.
                 HStack(spacing: notchWidth) {
                     UnevenRoundedRectangle(
@@ -1601,7 +1591,7 @@ struct OverlayStylePreview: View {
                     .fill(Color.black)
                     .frame(width: 16, height: notchHeight)
                 }
-            } else {
+            case .dropDown:
                 // Drop-down pill hanging below the menu bar from the notch.
                 UnevenRoundedRectangle(
                     topLeadingRadius: 0,
@@ -1611,6 +1601,15 @@ struct OverlayStylePreview: View {
                 )
                 .fill(Color.black)
                 .frame(width: notchWidth + 10, height: notchHeight + 12)
+            case .bottom:
+                // Floating pill centered just above the bottom edge.
+                VStack {
+                    Spacer()
+                    Capsule()
+                        .fill(Color.black)
+                        .frame(width: 30, height: 9)
+                        .padding(.bottom, 4)
+                }
             }
         }
         .frame(width: frameWidth, height: frameHeight)
@@ -1622,20 +1621,20 @@ struct OverlayStylePreview: View {
 struct OverlayStyleOptionRow: View {
     let title: String
     let subtitle: String
-    let isMinimalist: Bool
-    @Binding var selection: Bool
+    let placement: OverlayPlacement
+    @Binding var selection: OverlayPlacement
 
     var body: some View {
-        let isSelected = (selection == isMinimalist)
+        let isSelected = (selection == placement)
         Button(action: {
-            selection = isMinimalist
+            selection = placement
         }) {
             HStack(alignment: .center, spacing: 14) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 20))
                     .foregroundStyle(isSelected ? Color.blue : Color.secondary)
 
-                OverlayStylePreview(isMinimalist: isMinimalist)
+                OverlayStylePreview(placement: placement)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
@@ -1659,5 +1658,31 @@ struct OverlayStyleOptionRow: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The three overlay placements, in the order Setup and Settings list them.
+struct OverlayPlacementOptionRows: View {
+    @Binding var selection: OverlayPlacement
+
+    var body: some View {
+        OverlayStyleOptionRow(
+            title: "Minimalist menu-bar overlay",
+            subtitle: "Two slim wings flank the camera notch and stay inside the menu bar. Never covers app tabs or toolbars.",
+            placement: .menuBar,
+            selection: $selection
+        )
+        OverlayStyleOptionRow(
+            title: "Drop-down pill",
+            subtitle: "Single pill hangs below the menu bar during recording. Larger and more visible, but covers a thin strip of whatever app is active.",
+            placement: .dropDown,
+            selection: $selection
+        )
+        OverlayStyleOptionRow(
+            title: "Bottom floating pill",
+            subtitle: "Pill floats above everything, centered near the bottom of the screen. Stays clear of the menu bar and toolbars.",
+            placement: .bottom,
+            selection: $selection
+        )
     }
 }

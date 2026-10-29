@@ -523,7 +523,8 @@ struct GeneralSettingsView: View {
     @Environment(\.openURL) private var openURL
     @AppStorage("show_menu_bar_icon") private var showMenuBarIcon = true
     @AppStorage("overlay_display_id") private var overlayDisplayID = 0
-    @AppStorage("use_compact_overlay") private var useCompactOverlay = true
+    @AppStorage(OverlayPlacementPreference.storageKey) private var overlayPlacement = OverlayPlacementPreference.load(from: .standard)
+    @AppStorage(EscapeKeyPreference.storageKey) private var escapeKeyBehavior = EscapeKeyPreference.defaultBehavior
     @AppStorage(RecordingTimerPreference.storageKey) private var showRecordingTimer = RecordingTimerPreference.defaultEnabled
     @State private var screensVersion = 0
     @State private var apiDraft = APIConfigurationDraft()
@@ -1124,6 +1125,23 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Picker("Escape key", selection: $escapeKeyBehavior) {
+                    ForEach(EscapeKeyBehavior.allCases) { behavior in
+                        Text(behavior.title).tag(behavior)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Text(escapeKeyBehavior == .discard
+                    ? "Escape stops a tap-to-toggle recording or an in-progress transcription and throws it away."
+                    : "Escape passes through to the active app, so closing a popup never loses your recording. Use the overlay's X to discard instead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -1131,18 +1149,7 @@ struct GeneralSettingsView: View {
 
     private var overlaySection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            OverlayStyleOptionRow(
-                title: "Minimalist menu-bar overlay",
-                subtitle: "Two slim wings flank the camera notch and stay inside the menu bar. Never covers app tabs or toolbars.",
-                isMinimalist: true,
-                selection: $useCompactOverlay
-            )
-            OverlayStyleOptionRow(
-                title: "Drop-down pill",
-                subtitle: "Single pill hangs below the menu bar during recording. Larger and more visible, but covers a thin strip of whatever app is active.",
-                isMinimalist: false,
-                selection: $useCompactOverlay
-            )
+            OverlayPlacementOptionRows(selection: $overlayPlacement)
 
             Toggle("Show recording timer", isOn: $showRecordingTimer)
             Text("When off, the minimalist overlay shows a waveform instead of the timer, and the drop-down pill hides the timer. Applies to the next recording.")
