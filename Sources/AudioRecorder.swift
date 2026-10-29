@@ -1,6 +1,4 @@
 import AVFoundation
-import AudioToolbox
-import CoreAudio
 import CoreMedia
 import Foundation
 import os.log
@@ -75,10 +73,6 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private var captureSession: AVCaptureSession?
     private var currentInput: AVCaptureDeviceInput?
     private var audioDataOutput: AVCaptureAudioDataOutput?
-    /// The Audio Engine backend's graph and the device UID it opened.
-    private var audioEngine: AVAudioEngine?
-    private var audioEngineSink: AVAudioSinkNode?
-    private var audioEngineDeviceUID: String?
     private var sessionObservers: [NSObjectProtocol] = []
     private var tempFileURL: URL?
     private var recordingStartTime: CFAbsoluteTime = 0
@@ -245,16 +239,6 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         captureSession = nil
         currentInput = nil
         audioDataOutput = nil
-
-        if let engine = audioEngine {
-            engine.stop()
-            if let sink = audioEngineSink {
-                engine.detach(sink)
-            }
-        }
-        audioEngine = nil
-        audioEngineSink = nil
-        audioEngineDeviceUID = nil
     }
 
     private func reportRecordingFailure(_ error: Error, completion: ((URL?) -> Void)? = nil) {
@@ -375,7 +359,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
     }
 
-    private func appendBufferToFile(_ inputBuffer: AVAudioPCMBuffer) throws {
+    private func appendSampleBufferToFile(_ sampleBuffer: CMSampleBuffer) throws {
         if let fileWriteError = fileWriteErrorLock.withLock({ _ in
             self.fileWriteError
         }) {
@@ -386,7 +370,19 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             throw AudioRecorderError.failedToBeginFileRecording("Missing temporary output URL.")
         }
 
-        let sourceFormat = inputBuffer.format
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            throw AudioRecorderError.invalidInputFormat("Could not determine audio format from sample buffer.")
+        }
+        let rawSourceFormat = AVAudioFormat(cmAudioFormatDescription: formatDescription)
+        let sourceFormat = try validatedPCMBufferFormat(
+            rawSourceFormat,
+            context: "capture sample buffer"
+        )
+
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0 else { return }
+        let inputBuffer = try makePCMBuffer(from: sampleBuffer, format: sourceFormat, frameCount: frameCount)
+
         let targetFormat = recordingTargetFormat
         if !loggedCaptureFormat {
             loggedCaptureFormat = true
@@ -500,17 +496,11 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
     }
 
-    /// Copies a capture-session sample buffer into a PCM buffer, or returns nil when it is empty.
-    private func makePCMBuffer(from sampleBuffer: CMSampleBuffer) throws -> AVAudioPCMBuffer? {
-        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
-            throw AudioRecorderError.invalidInputFormat("Could not determine audio format from sample buffer.")
-        }
-        let format = try validatedPCMBufferFormat(
-            AVAudioFormat(cmAudioFormatDescription: formatDescription),
-            context: "capture sample buffer"
-        )
-        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
-        guard frameCount > 0 else { return nil }
+    private func makePCMBuffer(
+        from sampleBuffer: CMSampleBuffer,
+        format: AVAudioFormat,
+        frameCount: AVAudioFrameCount
+    ) throws -> AVAudioPCMBuffer {
         guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
             throw AudioRecorderError.failedToBeginFileRecording("Could not allocate PCM buffer for format \(format.settings).")
         }
@@ -587,28 +577,14 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         if let converterError {
             throw AudioRecorderError.failedToBeginFileRecording("Audio conversion failed: \(converterError.localizedDescription)")
         }
-        // A resampler can hold back its first frames while priming; callers skip empty output.
-        guard status != .error else {
+        guard status != .error, outputBuffer.frameLength > 0 else {
             throw AudioRecorderError.failedToBeginFileRecording("Audio conversion produced no data.")
         }
         return ConversionResult(buffer: outputBuffer, status: String(describing: status))
     }
 
-    private func makeSession(
-        deviceUID: String?,
-        backend: AudioCaptureBackend,
-        reason: String = "initial start"
-    ) throws {
+    private func makeSession(deviceUID: String?, reason: String = "initial start") throws {
         teardownSessionLocked()
-        switch backend {
-        case .captureSession:
-            try startCaptureSession(deviceUID: deviceUID, reason: reason)
-        case .audioEngine:
-            try startAudioEngine(deviceUID: deviceUID, reason: reason)
-        }
-    }
-
-    private func startCaptureSession(deviceUID: String?, reason: String) throws {
 
         let device = try preferredCaptureDevice(for: deviceUID, reason: reason)
 
@@ -670,145 +646,6 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         os_log(.info, log: recordingLog, "capture session running with device %{public}@ [uid=%{public}@]", device.localizedName, device.uniqueID)
     }
 
-    /// Opens the microphone through AVAudioEngine. A sink node receives each
-    /// device I/O buffer (about 10 ms) on the real-time thread; a tap would
-    /// batch roughly 100 ms, delaying the first buffer.
-    private func startAudioEngine(deviceUID: String?, reason: String) throws {
-        guard let resolvedUID = Self.resolvedDeviceUID(for: deviceUID),
-              let audioDeviceID = Self.audioDeviceID(forUID: resolvedUID) else {
-            throw AudioRecorderError.missingInputDevice
-        }
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        guard let inputUnit = inputNode.audioUnit else {
-            throw AudioRecorderError.failedToCreateCaptureInput("Audio engine has no input unit.")
-        }
-        var deviceID = audioDeviceID
-        let setDeviceStatus = AudioUnitSetProperty(
-            inputUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        guard setDeviceStatus == noErr else {
-            throw AudioRecorderError.failedToCreateCaptureInput("Could not select the microphone (OSStatus \(setDeviceStatus)).")
-        }
-
-        let hardwareFormat = try validatedPCMBufferFormat(
-            inputNode.inputFormat(forBus: 0),
-            context: "audio engine input"
-        )
-        // Float32 non-interleaved at the device's own rate and channel count.
-        guard let sinkFormat = AVAudioFormat(
-            standardFormatWithSampleRate: hardwareFormat.sampleRate,
-            channels: hardwareFormat.channelCount
-        ) else {
-            throw AudioRecorderError.invalidInputFormat("Could not describe the audio engine format.")
-        }
-
-        let sink = AVAudioSinkNode { [weak self] _, frameCount, audioBufferList in
-            guard let self, self._recording.withLock({ $0 }) else { return noErr }
-            // The buffer list is only valid during this call, so copy before leaving the I/O thread.
-            guard let copy = Self.copyPCMBuffer(audioBufferList, frameCount: frameCount, format: sinkFormat) else {
-                return noErr
-            }
-            self.sampleBufferQueue.async {
-                guard self._recording.withLock({ $0 }) else { return }
-                self.processCapturedBuffer(copy)
-            }
-            return noErr
-        }
-        engine.attach(sink)
-        engine.connect(inputNode, to: sink, format: sinkFormat)
-
-        audioEngine = engine
-        audioEngineSink = sink
-        audioEngineDeviceUID = resolvedUID
-        isSessionInterrupted = false
-        resetRecordingStateLocked()
-        installEngineObservers(for: engine)
-
-        do {
-            try engine.start()
-        } catch {
-            throw AudioRecorderError.failedToStartCaptureSession(error.localizedDescription)
-        }
-
-        os_log(
-            .info,
-            log: recordingLog,
-            "audio engine running (%{public}@) [uid=%{public}@] %.0fHz %u ch",
-            reason,
-            resolvedUID,
-            sinkFormat.sampleRate,
-            sinkFormat.channelCount
-        )
-    }
-
-    private func installEngineObservers(for engine: AVAudioEngine) {
-        removeSessionObservers()
-        let configurationObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: nil
-        ) { [weak self] _ in
-            // The engine stops itself when its device or format changes.
-            self?.handleRuntimeError(
-                AudioRecorderError.failedToStartCaptureSession("The audio device configuration changed.")
-            )
-        }
-        sessionObservers.append(configurationObserver)
-    }
-
-    private static func copyPCMBuffer(
-        _ audioBufferList: UnsafePointer<AudioBufferList>,
-        frameCount: AVAudioFrameCount,
-        format: AVAudioFormat
-    ) -> AVAudioPCMBuffer? {
-        guard frameCount > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            return nil
-        }
-        buffer.frameLength = frameCount
-        let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: audioBufferList))
-        let destination = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-        for index in 0..<min(source.count, destination.count) {
-            guard let sourceData = source[index].mData, let destinationData = destination[index].mData else {
-                continue
-            }
-            let byteCount = min(source[index].mDataByteSize, destination[index].mDataByteSize)
-            memcpy(destinationData, sourceData, Int(byteCount))
-        }
-        return buffer
-    }
-
-    /// AVCaptureDevice audio UIDs are Core Audio device UIDs.
-    private static func audioDeviceID(forUID uid: String) -> AudioDeviceID? {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var cfUID = uid as CFString
-        var deviceID = AudioDeviceID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let status = withUnsafeMutablePointer(to: &cfUID) { uidPointer in
-            AudioObjectGetPropertyData(
-                AudioObjectID(kAudioObjectSystemObject),
-                &address,
-                UInt32(MemoryLayout<CFString>.size),
-                uidPointer,
-                &size,
-                &deviceID
-            )
-        }
-        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
-        return deviceID
-    }
-
     /// Clears per-recording writer state. Runs on the sample-buffer queue so a
     /// warm session's in-flight callbacks never see a half-reset writer.
     private func resetRecordingStateLocked() {
@@ -835,25 +672,13 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         return defaultCaptureDevice()?.uniqueID
     }
 
-    private var activeBackendLocked: AudioCaptureBackend? {
-        if captureSession != nil { return .captureSession }
-        if audioEngine != nil { return .audioEngine }
-        return nil
-    }
-
-    private var isCaptureRunningLocked: Bool {
-        captureSession?.isRunning ?? audioEngine?.isRunning ?? false
-    }
-
-    private func canReuseWarmSessionLocked(deviceUID: String?, backend: AudioCaptureBackend) -> Bool {
-        guard let activeBackend = activeBackendLocked else { return false }
+    private func canReuseWarmSessionLocked(deviceUID: String?) -> Bool {
+        guard let captureSession else { return false }
         return MicrophoneReadinessPreference.canReuseWarmSession(
-            isRunning: isCaptureRunningLocked,
+            isRunning: captureSession.isRunning,
             isInterrupted: isSessionInterrupted,
-            warmDeviceUID: currentInput?.device.uniqueID ?? audioEngineDeviceUID,
-            resolvedDeviceUID: Self.resolvedDeviceUID(for: deviceUID),
-            warmBackend: activeBackend,
-            requestedBackend: backend
+            warmDeviceUID: currentInput?.device.uniqueID,
+            resolvedDeviceUID: Self.resolvedDeviceUID(for: deviceUID)
         )
     }
 
@@ -861,7 +686,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     /// stop accepting buffers behind the ones already queued instead of
     /// stopping the device; those queued buffers still reach the file.
     private func endCaptureLocked() {
-        if keepsSessionWarm, isCaptureRunningLocked, !isSessionInterrupted {
+        if keepsSessionWarm, captureSession?.isRunning == true, !isSessionInterrupted {
             sampleBufferQueue.sync {
                 self._recording.withLock { $0 = false }
             }
@@ -872,13 +697,13 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
     /// Opens the microphone ahead of the next recording and keeps it open
     /// between recordings until `coolDown()`. Buffers are dropped while idle.
-    func warmUp(deviceUID: String?, backend: AudioCaptureBackend) {
+    func warmUp(deviceUID: String?) {
         sessionQueue.async {
             self.keepsSessionWarm = true
             guard !self._recording.withLock({ $0 }) else { return }
-            guard !self.canReuseWarmSessionLocked(deviceUID: deviceUID, backend: backend) else { return }
+            guard !self.canReuseWarmSessionLocked(deviceUID: deviceUID) else { return }
             do {
-                try self.makeSession(deviceUID: deviceUID, backend: backend, reason: "warm up")
+                try self.makeSession(deviceUID: deviceUID, reason: "warm up")
             } catch {
                 os_log(.error, log: recordingLog, "warm up failed: %{public}@", error.localizedDescription)
                 self.teardownSessionLocked()
@@ -901,11 +726,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         captureTiming.withLock { $0.prepare() }
     }
 
-    func startRecording(
-        deviceUID: String? = nil,
-        backend: AudioCaptureBackend = AudioCaptureBackendPreference.defaultBackend,
-        timingGeneration: UInt64? = nil
-    ) throws {
+    func startRecording(deviceUID: String? = nil, timingGeneration: UInt64? = nil) throws {
         let timingGeneration = timingGeneration ?? prepareRecordingTiming()
         let t0 = CFAbsoluteTimeGetCurrent()
         recordingStartTime = t0
@@ -920,11 +741,11 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
 
         do {
             try sessionQueue.sync {
-                if self.canReuseWarmSessionLocked(deviceUID: deviceUID, backend: backend) {
+                if self.canReuseWarmSessionLocked(deviceUID: deviceUID) {
                     os_log(.info, log: recordingLog, "reusing warm capture session")
                     self.resetRecordingStateLocked()
                 } else {
-                    try self.makeSession(deviceUID: deviceUID, backend: backend)
+                    try self.makeSession(deviceUID: deviceUID)
                 }
                 self.tempFileURL = outputURL
                 self.captureTiming.withLock { $0.start(at: .now, generation: timingGeneration) }
@@ -946,13 +767,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             self.isRecording = true
             self.audioLevel = 0.0
         }
-        os_log(
-            .info,
-            log: recordingLog,
-            "startRecording() complete: %.3fms total [backend=%{public}@]",
-            (CFAbsoluteTimeGetCurrent() - t0) * 1000,
-            backend.rawValue
-        )
+        os_log(.info, log: recordingLog, "startRecording() complete: %.3fms total", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
     }
 
     func stopRecording(completion: @escaping (URL?) -> Void) {
@@ -1008,7 +823,21 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         }
     }
 
-    private func updateAudioLevel(from inputBuffer: AVAudioPCMBuffer) -> Float {
+    private func updateAudioLevel(from sampleBuffer: CMSampleBuffer) -> Float {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else { return 0 }
+        guard let sourceFormat = try? validatedPCMBufferFormat(
+            AVAudioFormat(cmAudioFormatDescription: formatDescription),
+            context: "audio level sample buffer"
+        ) else { return 0 }
+
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0 else { return 0 }
+        guard let inputBuffer = try? makePCMBuffer(
+            from: sampleBuffer,
+            format: sourceFormat,
+            frameCount: frameCount
+        ) else { return 0 }
+
         let rms = rmsLevel(for: inputBuffer)
         let normalizedDisplayLevel = liveLevelNormalizerLock.withLock {
             $0.normalizedLevel(forRMS: rms)
@@ -1073,9 +902,26 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         return Float(sqrt(sumOfSquares / Double(totalSamples)))
     }
 
-    private func emitPCM16IfNeeded(from inputBuffer: AVAudioPCMBuffer) {
+    private func emitPCM16IfNeeded(from sampleBuffer: CMSampleBuffer) {
         guard let handler = onPCM16Samples else { return }
-        let sourceFormat = inputBuffer.format
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
+            return
+        }
+        guard let validatedSourceFormat = try? validatedPCMBufferFormat(
+            AVAudioFormat(cmAudioFormatDescription: formatDescription),
+            context: "realtime transcription sample buffer"
+        ) else {
+            return
+        }
+        let sourceFormat = validatedSourceFormat
+        let frameCount = AVAudioFrameCount(CMSampleBufferGetNumSamples(sampleBuffer))
+        guard frameCount > 0 else { return }
+
+        guard let inputBuffer = try? makePCMBuffer(
+            from: sampleBuffer,
+            format: sourceFormat,
+            frameCount: frameCount
+        ) else { return }
 
         let converter = pcm16ConverterLock.withLock { existing -> AVAudioConverter? in
             if let existing, existing.inputFormat == sourceFormat {
@@ -1111,42 +957,25 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     ) {
         guard _recording.withLock({ $0 }) else { return }
 
-        let inputBuffer: AVAudioPCMBuffer
         do {
-            guard let buffer = try makePCMBuffer(from: sampleBuffer) else { return }
-            inputBuffer = buffer
+            try appendSampleBufferToFile(sampleBuffer)
         } catch {
-            recordCaptureFailure(error)
-            return
-        }
-        processCapturedBuffer(inputBuffer)
-    }
-
-    private func recordCaptureFailure(_ error: Error) {
-        fileWriteErrorLock.withLock { _ in
-            fileWriteError = error
-        }
-        os_log(.error, log: recordingLog, "audio file write failed: %{public}@", error.localizedDescription)
-        reportRecordingFailure(error)
-    }
-
-    /// Shared by both backends; runs on the sample-buffer queue.
-    private func processCapturedBuffer(_ inputBuffer: AVAudioPCMBuffer) {
-        do {
-            try appendBufferToFile(inputBuffer)
-        } catch {
-            recordCaptureFailure(error)
+            fileWriteErrorLock.withLock { _ in
+                fileWriteError = error
+            }
+            os_log(.error, log: recordingLog, "audio file write failed: %{public}@", error.localizedDescription)
+            reportRecordingFailure(error)
             return
         }
 
-        emitPCM16IfNeeded(from: inputBuffer)
+        emitPCM16IfNeeded(from: sampleBuffer)
 
         let count = _bufferCount.withLock { value -> Int in
             value += 1
             return value
         }
 
-        let rms = updateAudioLevel(from: inputBuffer)
+        let rms = updateAudioLevel(from: sampleBuffer)
         if count <= Self.sampleRateLogLimit {
             let elapsed = (CFAbsoluteTimeGetCurrent() - recordingStartTime) * 1000
             os_log(.info, log: recordingLog, "buffer #%d at %.3fms, rms=%.6f", count, elapsed, rms)

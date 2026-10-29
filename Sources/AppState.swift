@@ -541,14 +541,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    @Published var audioCaptureBackend: AudioCaptureBackend {
-        didSet {
-            UserDefaults.standard.set(audioCaptureBackend.rawValue, forKey: AudioCaptureBackendPreference.storageKey)
-            // A warm microphone reopens on the new backend; a cold one switches on the next press.
-            applyMicrophoneReadiness()
-        }
-    }
-
     @Published var preserveClipboard: Bool {
         didSet {
             UserDefaults.standard.set(preserveClipboard, forKey: preserveClipboardStorageKey)
@@ -847,7 +839,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.shortcutStartDelay = shortcutStartDelay
         self.originalFieldInsertionEnabled = OriginalFieldInsertionPreference.load(from: .standard)
         self.microphoneReadiness = MicrophoneReadinessPreference.load(from: .standard)
-        self.audioCaptureBackend = AudioCaptureBackendPreference.load(from: .standard)
         self.preserveClipboard = preserveClipboard
         self.cleanupLevel = CleanupLevel.load(from: .standard)
         self.formattingPreferences = FormattingPreferences.load(from: .standard)
@@ -1863,7 +1854,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func warmMicrophoneIfAuthorized() {
         // Warming up must never be what triggers the microphone permission prompt.
         guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        audioRecorder.warmUp(deviceUID: selectedMicrophoneID, backend: audioCaptureBackend)
+        audioRecorder.warmUp(deviceUID: selectedMicrophoneID)
     }
 
     private func updateInsertionAccessibilityPreparation() {
@@ -2449,7 +2440,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         // Bring the waveform to life when first real audio arrives (any non-zero RMS)
         let deviceUID = selectedMicrophoneID
-        let captureBackend = audioCaptureBackend
         audioRecorder.onRecordingReady = { [weak self] captureStartedAt in
             // The recorder already delivers on main after validating the generation.
             // Do not enqueue again: cancellation could invalidate it between main-queue blocks.
@@ -2474,11 +2464,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             guard let self else { return }
             let t0 = CFAbsoluteTimeGetCurrent()
             do {
-                try self.audioRecorder.startRecording(
-                    deviceUID: deviceUID,
-                    backend: captureBackend,
-                    timingGeneration: timingGeneration
-                )
+                try self.audioRecorder.startRecording(deviceUID: deviceUID, timingGeneration: timingGeneration)
                 os_log(.info, log: recordingLog, "audioRecorder.startRecording() done: %.3fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
                 DispatchQueue.main.async { [self] in
                     guard self.isRecording, self.activeRecordingTriggerMode != nil else { return }

@@ -1407,22 +1407,6 @@ struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-
-            Divider()
-                .padding(.vertical, 2)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Picker("Audio engine", selection: $appState.audioCaptureBackend) {
-                    ForEach(AudioCaptureBackend.allCases) { backend in
-                        Text(backend.title).tag(backend)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                Text(audioCaptureBackendDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
         }
         .onAppear {
             appState.refreshAvailableMicrophones()
@@ -1437,15 +1421,6 @@ struct GeneralSettingsView: View {
             return "The microphone stays open for 5 minutes after each dictation so the next one starts instantly. macOS shows the microphone indicator while it is open. Audio is ignored until you press the shortcut."
         case .always:
             return "The microphone stays open while \(AppName.displayName) runs so recording starts instantly. macOS shows the microphone indicator the whole time, and Bluetooth headsets may stay in lower-quality call mode. Audio is ignored until you press the shortcut."
-        }
-    }
-
-    private var audioCaptureBackendDescription: String {
-        switch appState.audioCaptureBackend {
-        case .captureSession:
-            return "The original way \(AppName.displayName) opens the microphone."
-        case .audioEngine:
-            return "A lighter, lower-level way to open the microphone that may start recording sooner. Takes effect on the next recording."
         }
     }
 

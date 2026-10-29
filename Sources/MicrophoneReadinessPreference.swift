@@ -34,19 +34,16 @@ enum MicrophoneReadinessPreference {
     }
 
     /// A warm session is reused only while it is running uninterrupted on the
-    /// device and audio API the next recording would open; anything else
-    /// takes the cold path.
+    /// device the next recording would open; anything else takes the cold path.
     static func canReuseWarmSession(
         isRunning: Bool,
         isInterrupted: Bool,
         warmDeviceUID: String?,
-        resolvedDeviceUID: String?,
-        warmBackend: AudioCaptureBackend?,
-        requestedBackend: AudioCaptureBackend
+        resolvedDeviceUID: String?
     ) -> Bool {
         guard isRunning, !isInterrupted, let warmDeviceUID, let resolvedDeviceUID else {
             return false
         }
-        return warmDeviceUID == resolvedDeviceUID && warmBackend == requestedBackend
+        return warmDeviceUID == resolvedDeviceUID
     }
 }
