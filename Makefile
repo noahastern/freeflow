@@ -23,6 +23,7 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/CleanupLevel.swift \
 	Sources/AppTextInsertionCore.swift \
 	Sources/AppTextInsertionTarget.swift \
+	Sources/AudioCaptureBackendPreference.swift \
 	Sources/ContextInferenceFailure.swift \
 	Sources/LLMAPITransport.swift \
 	Sources/LLMCooldownManager.swift \
