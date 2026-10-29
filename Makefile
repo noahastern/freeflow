@@ -59,7 +59,7 @@ ICON_SOURCE = Resources/AppIcon-Source.png
 ICON_ICNS = Resources/AppIcon.icns
 endif
 
-.PHONY: all check clean run icon dmg codesign-dmg notarize test typecheck validate install-local
+.PHONY: all check clean run icon dmg codesign-dmg notarize test typecheck validate install-local install
 
 all: $(APP_EXECUTABLE_TARGET)
 
@@ -212,3 +212,19 @@ install-local:
 	@rm -rf "$(LOCAL_INSTALL_APP)"
 	@mv "$(BUILD_DIR)/FreeFlow.app" "$(LOCAL_INSTALL_APP)"
 	@echo "Installed $(LOCAL_INSTALL_APP) ($(LOCAL_VERSION), signed by $(LOCAL_IDENTITY))"
+
+# Installs the latest origin/main rather than the working tree, so uncommitted
+# or unpushed work never ends up in /Applications. The build runs in a
+# throwaway worktree and leaves the current checkout untouched.
+INSTALL_WORKTREE = $(CURDIR)/$(BUILD_DIR)/install-main
+
+install:
+	git fetch --quiet origin main
+	@git worktree remove --force "$(INSTALL_WORKTREE)" >/dev/null 2>&1 || rm -rf "$(INSTALL_WORKTREE)"
+	@git worktree prune
+	@git worktree add --detach --quiet "$(INSTALL_WORKTREE)" origin/main
+	@echo "Building origin/main at $$(git -C "$(INSTALL_WORKTREE)" log -1 --format='%h %s')"
+	@status=0; $(MAKE) --no-print-directory -C "$(INSTALL_WORKTREE)" install-local || status=$$?; \
+		git worktree remove --force "$(INSTALL_WORKTREE)"; \
+		test $$status -eq 0 && open "$(LOCAL_INSTALL_APP)"; \
+		exit $$status

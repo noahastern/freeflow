@@ -23,6 +23,23 @@ that architecture unless the user explicitly approves a migration.
 - `.github/workflows/release.yml`: semver-tagged production release.
 - `.github/workflows/dev-release.yml`: signed development release from `main`.
 
+## This fork
+
+This checkout is `noahastern/freeflow` (`origin`), a personal fork of
+`zachlatta/freeflow` (`upstream`).
+
+- Pushing to `origin main` is allowed when the user asks. Never push to
+  `upstream`.
+- GitHub does not build the fork, and the in-app updater installs only official
+  `upstream` releases. The way to get a change into `/Applications` is
+  `make install`: it fetches `origin/main`, builds it in a temporary worktree,
+  signs it with the local Apple Development identity, quits FreeFlow, replaces
+  `/Applications/FreeFlow.app`, and relaunches it. Unpushed work is not
+  included; `make install-local` builds the current working tree instead.
+- Once a change is on `origin/main`, offer to run `make install` (also `/install`
+  in Claude Code). Run it only when the user says yes, because it quits the
+  running app.
+
 ## Working rules
 
 - Search with `rg` or `rg --files` before editing.
@@ -31,7 +48,7 @@ that architecture unless the user explicitly approves a migration.
 - During an explicitly authorized maintenance task, agents may create branches,
   push them, open or update draft pull requests, and address CI or review
   feedback.
-- Do not push directly to `main`.
+- Do not push directly to `main` on `upstream`. On this fork, see "This fork".
 - Do not merge, tag, publish a release, or move the `dev` tag unless the user
   explicitly authorizes that action.
 - Do not change versions, release notes, signing, notarization, or release
