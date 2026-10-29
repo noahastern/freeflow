@@ -1290,7 +1290,41 @@ struct GeneralSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if appState.cleanupLevel != .none {
+                Divider()
+                    .padding(.vertical, 2)
+
+                Text("Formatting")
+                    .font(.subheadline.weight(.semibold))
+                Text("How often cleanup adds each kind of structure. Default follows the system prompt.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                ForEach(FormattingElement.allCases) { element in
+                    HStack {
+                        Text(element.title)
+                        Spacer()
+                        Picker(element.title, selection: formattingAmountBinding(for: element)) {
+                            ForEach(FormattingAmount.allCases) { amount in
+                                Text(amount.title).tag(amount)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(width: 220)
+                    }
+                }
+            }
         }
+    }
+
+    private func formattingAmountBinding(for element: FormattingElement) -> Binding<FormattingAmount> {
+        Binding(
+            get: { appState.formattingPreferences.amount(for: element) },
+            set: { appState.formattingPreferences.setAmount($0, for: element) }
+        )
     }
 
     // MARK: Text insertion
@@ -1707,7 +1741,7 @@ struct PromptsSettingsView: View {
             && appState.customSystemPromptLastModified < PostProcessingService.defaultSystemPromptDate
 
         return VStack(alignment: .leading, spacing: 10) {
-            Text("Controls how raw transcriptions are cleaned up.")
+            Text("The base instructions for cleanup. Your cleanup level, formatting choices, app styles, and vocabulary are added on top of this prompt.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -1893,6 +1927,8 @@ struct PromptsSettingsView: View {
         let input = systemTestInput
         let customPrompt = appState.customSystemPrompt
         let vocabulary = appState.customVocabulary
+        let cleanupLevel = appState.cleanupLevel
+        let formattingPrompt = appState.formattingPreferences.promptSection
 
         let context = AppContext(
             appName: "\(AppName.displayName) Settings",
@@ -1913,7 +1949,9 @@ struct PromptsSettingsView: View {
                     transcript: input,
                     context: context,
                     customVocabulary: vocabulary,
-                    customSystemPrompt: customPrompt
+                    customSystemPrompt: customPrompt,
+                    formattingPrompt: formattingPrompt,
+                    cleanupLevel: cleanupLevel
                 )
                 await MainActor.run {
                     systemTestOutput = result.transcript

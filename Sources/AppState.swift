@@ -561,6 +561,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var formattingPreferences: FormattingPreferences {
+        didSet {
+            formattingPreferences.save(to: .standard)
+        }
+    }
+
     @Published var keepDictationInClipboardHistory: Bool {
         didSet {
             UserDefaults.standard.set(keepDictationInClipboardHistory, forKey: keepDictationInClipboardHistoryStorageKey)
@@ -844,6 +850,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.audioCaptureBackend = AudioCaptureBackendPreference.load(from: .standard)
         self.preserveClipboard = preserveClipboard
         self.cleanupLevel = CleanupLevel.load(from: .standard)
+        self.formattingPreferences = FormattingPreferences.load(from: .standard)
         self.keepDictationInClipboardHistory = keepDictationInClipboardHistory
         self.realtimeStreamingEnabled = realtimeStreamingEnabled
         self.realtimeStreamingModel = realtimeStreamingModel
@@ -1349,6 +1356,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     customVocabulary: capturedCustomVocabulary,
                     customSystemPrompt: capturedCustomSystemPrompt,
                     appStyleSettings: self.appStyleSettings,
+                    formattingPreferences: self.formattingPreferences,
                     outputLanguage: self.outputLanguage,
                     dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                     cleanupLevel: self.cleanupLevel
@@ -2697,6 +2705,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         customVocabulary: String,
         customSystemPrompt: String,
         appStyleSettings: AppStyleSettings,
+        formattingPreferences: FormattingPreferences,
         outputLanguage: String = "",
         dictationLanguage: String = "",
         cleanupLevel: CleanupLevel
@@ -2769,6 +2778,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     windowTitle: context.windowTitle,
                     settings: appStyleSettings
                 ),
+                formattingPrompt: formattingPreferences.promptSection,
                 cleanupLevel: cleanupLevel,
                 outputLanguage: outputLanguage,
                 dictationLanguage: dictationLanguage
@@ -2936,6 +2946,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         customVocabulary: self.customVocabulary,
                         customSystemPrompt: self.customSystemPrompt,
                         appStyleSettings: self.appStyleSettings,
+                        formattingPreferences: self.formattingPreferences,
                         outputLanguage: self.outputLanguage,
                         dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                         cleanupLevel: self.cleanupLevel

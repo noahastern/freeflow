@@ -21,6 +21,7 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/AppName.swift \
 	Sources/AppStyle.swift \
 	Sources/CleanupLevel.swift \
+	Sources/FormattingPreferences.swift \
 	Sources/AppTextInsertionCore.swift \
 	Sources/AppTextInsertionTarget.swift \
 	Sources/AudioCaptureBackendPreference.swift \

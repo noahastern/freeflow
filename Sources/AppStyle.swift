@@ -117,7 +117,7 @@ The text is going into a code editor or terminal: usually a prompt to a coding a
 """
         case .documents:
             return """
-The text is going into a document or note. Use complete sentences and paragraph breaks between distinct thoughts. Keep the speaker's wording.
+The text is going into a document or note. Use complete sentences and paragraph breaks between distinct thoughts. Keep the speaker's voice.
 """
         case .general:
             return ""

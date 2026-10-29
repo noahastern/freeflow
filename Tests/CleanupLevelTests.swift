@@ -24,6 +24,9 @@ enum CleanupLevelTests {
             defaults.set("light", forKey: CleanupLevel.storageKey)
             TestSupport.expectEqual(CleanupLevel.load(from: defaults), .light)
 
+            defaults.set("high", forKey: CleanupLevel.storageKey)
+            TestSupport.expectEqual(CleanupLevel.load(from: defaults), .high)
+
             defaults.set("synthetic-unknown", forKey: CleanupLevel.storageKey)
             TestSupport.expectEqual(CleanupLevel.load(from: defaults), .none)
         }
@@ -38,6 +41,10 @@ enum CleanupLevelTests {
             CleanupLevel.light.save(to: defaults)
             TestSupport.expect(!defaults.bool(forKey: CleanupLevel.legacyPreserveExactWordingKey), "Light must turn exact wording off")
             TestSupport.expectEqual(CleanupLevel.load(from: defaults), .light)
+
+            CleanupLevel.high.save(to: defaults)
+            TestSupport.expect(!defaults.bool(forKey: CleanupLevel.legacyPreserveExactWordingKey), "High must turn exact wording off")
+            TestSupport.expectEqual(CleanupLevel.load(from: defaults), .high)
         }
     }
 
@@ -48,5 +55,13 @@ enum CleanupLevelTests {
         TestSupport.expect(light.hasPrefix("Cleanup level: Light."), "Light must name itself")
         TestSupport.expect(light.contains("\"you know\""), "Light must keep verbal habits")
         TestSupport.expect(light.contains("paragraph breaks"), "Light must still lay out paragraphs")
+        TestSupport.expect(light.contains("Do not turn spoken items into a list"), "Light must not build implied lists")
+
+        TestSupport.expectEqual(CleanupLevel.allCases, [.none, .light, .medium, .high])
+        let high = CleanupLevel.high.promptSection
+        TestSupport.expect(high.hasPrefix("Cleanup level: High."), "High must name itself")
+        TestSupport.expect(high.contains("clarity, brevity, and polish"), "High must ask for a tightening rewrite")
+        TestSupport.expect(high.contains("Never drop a point"), "High must keep every point the speaker made")
+        TestSupport.expect(high.contains("keep every requirement, constraint, and detail"), "High must not condense prompts")
     }
 }
