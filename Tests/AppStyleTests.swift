@@ -67,7 +67,8 @@ enum AppStyleTests {
     }
 
     private static func testStylesDescribeLineBreaks() {
-        TestSupport.expect(AppStyleCategory.messaging.defaultInstruction.contains("single line break"), "Chat puts separate thoughts on separate lines")
+        TestSupport.expect(AppStyleCategory.messaging.defaultInstruction.contains("single line break"), "Chat separates a change of subject with one line break")
+        TestSupport.expect(!AppStyleCategory.messaging.defaultInstruction.contains("each thought on its own line"), "Chat must not break after every thought")
         TestSupport.expect(AppStyleCategory.aiAssistant.defaultInstruction.contains("own paragraphs"), "Prompts separate distinct requests")
         TestSupport.expect(AppStyleCategory.coding.defaultInstruction.contains("stays on one line"), "Commands stay on one line")
     }

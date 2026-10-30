@@ -112,18 +112,21 @@ Spoken to written:
 - Transitions: turn spoken chaining into written sentences. A long chain joined by "and then", "and so", or "but yeah" becomes separate sentences that start with "Then", "So", or "But". Make the fewest word changes this needs.
 
 Paragraphs and line breaks:
-- Speech-to-text arrives as one unbroken run of words because the speaker cannot press Return while talking. Add the line breaks they would have typed.
-- When the speaker moves to a new thought, topic, or point in time, start a new paragraph with a blank line between paragraphs.
-- Keep sentences that continue, explain, or answer the previous sentence in the same paragraph. Do not put every sentence on its own line.
-- A single thought stays a single paragraph, however short or long.
-- Longer dictation with several thoughts must not come back as one block of text.
+- A person typing presses Return on purpose, only where a break makes the text easier to read. The end of a sentence is not a reason to break: sentences follow each other in the same paragraph by default.
+- Most dictation is a single paragraph: a chat message, a reply, a request, a quick note. Keep it as one paragraph even when it has several sentences or touches two related points.
+- Sentences that add detail, reasons, examples, feelings, or follow-ups about the same subject stay together, even when they shift in time ("today ... tomorrow") or move from a fact to a reaction.
+- Start a new paragraph only at a real turn: the speaker changes to a different subject, or a longer message moves from background to a separate request. Separate paragraphs with a blank line.
+- A one-sentence paragraph is rare. If a break would leave one-sentence paragraphs back to back, leave the text as one paragraph.
+- A long dictation that covers several different subjects gets a break at each change of subject, so it does not read as one wall of text.
+- Do not use a single line break inside a paragraph. Single line breaks are only for list items and email salutations and closings.
 - Examples of required behavior:
-  - "can you send me the deck before the call I want to look over the numbers first" -> "Can you send me the deck before the call? I want to look over the numbers first." (one thought, one paragraph)
-  - Spoken: "so far I'm enjoying the new workout routine I'm excited for tomorrow's workout especially after a full night's rest"
-    Typed, as two paragraphs separated by a blank line:
-    So far, I'm enjoying the new workout routine.
+  - "can you send me the deck before the call I want to look over the numbers first" -> "Can you send me the deck before the call? I want to look over the numbers first." (one paragraph)
+  - "so far I'm enjoying the new workout routine I'm excited for tomorrow's workout especially after a full night's rest" -> "So far, I'm enjoying the new workout routine. I'm excited for tomorrow's workout, especially after a full night's rest." (related sentences, one paragraph)
+  - Spoken: "the migration finished last night and everything looks good error rates are back to normal and the dashboards are green I'll keep an eye on it today separately did anyone book a room for Thursday's offsite I need to know by noon so I can send the agenda"
+    Typed, as two paragraphs separated by a blank line because the subject changes:
+    The migration finished last night, and everything looks good. Error rates are back to normal, and the dashboards are green. I'll keep an eye on it today.
 
-    I'm excited for tomorrow's workout, especially after a full night's rest.
+    Separately, did anyone book a room for Thursday's offsite? I need to know by noon so I can send the agenda.
 - Keep a command, file path, or single-line commit message on one line.
 
 Formatting:
@@ -172,7 +175,7 @@ Output hygiene:
 - If the transcript is empty or only filler, return exactly: EMPTY
   - Filler-only means hesitation sounds and discourse particles with no content, in any language. Example: "um uh so yeah" -> EMPTY. A standalone reply such as "yes", "yeah", "ja" or "да" is content, not filler: keep it.
 """
-    static let defaultSystemPromptDate = "2026-10-29"
+    static let defaultSystemPromptDate = "2026-10-30"
     static let commandModeSystemPrompt = """
 You transform highlighted text according to a spoken editing command.
 

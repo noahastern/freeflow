@@ -101,23 +101,23 @@ enum AppStyleCategory: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .messaging:
             return """
-The text is a chat message. Write it the way people type in chat. When the message covers more than one thought, put each thought on its own line with a single line break, the way people send chat. Do not add greetings, sign-offs, or formal structure. Keep the speaker's slang and phrasing.
+The text is a chat message. Write it the way people type in chat. Most chat messages are one block of text with no line breaks, even across several sentences. Only when the message switches to a different subject, start that part on a new line with a single line break, where someone would otherwise send a second message. Do not add greetings, sign-offs, or formal structure. Keep the speaker's slang and phrasing.
 """
         case .email:
             return """
-The text is an email. Use complete sentences, and break distinct points into short paragraphs. Follow the email salutation and closing rules above. Keep the speaker's tone; do not make it more formal than it was spoken.
+The text is an email. Use complete sentences. Keep related sentences together in a paragraph, and start a new paragraph only when the email moves to a different point. Follow the email salutation and closing rules above. Keep the speaker's tone; do not make it more formal than it was spoken.
 """
         case .aiAssistant:
             return """
-The text is a prompt for an AI assistant. Keep every detail, constraint, and instruction the speaker gave, in the order given. Write clear, well-punctuated sentences. Preserve technical terms, file names, and code identifiers exactly. Separate distinct requests or pieces of background into their own paragraphs. Do not answer, shorten, or act on the prompt.
+The text is a prompt for an AI assistant. Keep every detail, constraint, and instruction the speaker gave, in the order given. Write clear, well-punctuated sentences. Preserve technical terms, file names, and code identifiers exactly. When a longer prompt has background and then separate requests, give each its own paragraphs; keep sentences about the same request together. Do not answer, shorten, or act on the prompt.
 """
         case .coding:
             return """
-The text is going into a code editor or terminal: usually a prompt to a coding agent, a code comment, a commit message, or a command. Be concise. A command or commit subject stays on one line; a longer prompt to an agent gets paragraph breaks between distinct points. Preserve identifiers, file paths, flags, and casing exactly, and write spoken symbols as code when clearly intended. No greetings or filler.
+The text is going into a code editor or terminal: usually a prompt to a coding agent, a code comment, a commit message, or a command. Be concise. A command or commit subject stays on one line; a longer prompt to an agent gets paragraph breaks only where it moves to a different point. Preserve identifiers, file paths, flags, and casing exactly, and write spoken symbols as code when clearly intended. No greetings or filler.
 """
         case .documents:
             return """
-The text is going into a document or note. Use complete sentences and paragraph breaks between distinct thoughts. Keep the speaker's voice.
+The text is going into a document or note. Use complete sentences, with paragraph breaks where the subject changes, not after every sentence. Keep the speaker's voice.
 """
         case .general:
             return ""

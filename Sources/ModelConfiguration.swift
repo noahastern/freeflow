@@ -88,9 +88,9 @@ public struct ModelConfiguration {
             )
         } else if cleanModel == "openai/gpt-oss-120b" {
             return ModelConfig(
-                maxCompletionTokens: nil,
-                reasoningEffort: nil,
-                includeReasoning: nil,
+                maxCompletionTokens: 4096,
+                reasoningEffort: "low",
+                includeReasoning: false,
                 shouldStripThinkTags: false
             )
         } else if cleanModel == "openai/gpt-oss-safeguard-20b" {

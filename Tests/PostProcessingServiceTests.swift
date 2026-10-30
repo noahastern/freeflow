@@ -10,6 +10,7 @@ enum PostProcessingServiceTests {
         testEnglishRequestIsUnchanged()
         testAppStyleAndVocabularyReachRequest()
         testDefaultPromptAsksForParagraphBreaks()
+        testDefaultPromptKeepsRelatedSentencesTogether()
         testLightCleanupReachesRequest()
         testHighCleanupReachesRequest()
         testDefaultPromptCleansLikeWisprFlow()
@@ -109,11 +110,26 @@ enum PostProcessingServiceTests {
         TestSupport.expect(prompt.contains("Paragraphs and line breaks:"), "Default prompt must have a paragraph section")
         TestSupport.expect(prompt.contains("line breaks, paragraph breaks, and list layout are not added content."), "Hard contract must allow line breaks")
         TestSupport.expect(
-            prompt.contains("new workout routine.\n\n    I'm excited for tomorrow's workout"),
+            prompt.contains("I'll keep an eye on it today.\n\n    Separately, did anyone book a room"),
             "Paragraph example must show a real blank line"
         )
         TestSupport.expect(!prompt.contains("\\n"), "Prompt must not show a literal backslash-n the model could copy")
         TestSupport.expect(!prompt.contains("for short messages"), "Prompt must not frame every dictation as a short message")
+    }
+
+    // Regression: cleanup broke a new line after nearly every sentence because
+    // the paragraph example split two related sentences and "point in time"
+    // counted as a reason to break.
+    private static func testDefaultPromptKeepsRelatedSentencesTogether() {
+        let prompt = PostProcessingService.defaultSystemPrompt
+        TestSupport.expect(prompt.contains("The end of a sentence is not a reason to break"), "Sentence ends must not imply line breaks")
+        TestSupport.expect(
+            prompt.contains("So far, I'm enjoying the new workout routine. I'm excited for tomorrow's workout"),
+            "Related sentences must be shown in one paragraph"
+        )
+        TestSupport.expect(!prompt.contains("new workout routine.\n"), "Related sentences must not be split in any example")
+        TestSupport.expect(!prompt.contains("or point in time"), "A shift in time alone must not start a paragraph")
+        TestSupport.expect(!prompt.contains("must not come back as one block"), "Prompt must not pressure the model to break text")
     }
 
     private static let directive = "The dictation is primarily in Russian"
