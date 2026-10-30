@@ -19,7 +19,7 @@ enum ModelConfigurationTests {
 
     private static func testKnownModelSettingsRemainStable() {
         let gptOSS = ModelConfiguration.config(for: "openai/gpt-oss-20b")
-        TestSupport.expectEqual(gptOSS.maxCompletionTokens, 4096)
+        TestSupport.expectEqual(gptOSS.maxCompletionTokens, 16384)
         TestSupport.expectEqual(gptOSS.reasoningEffort, "low")
         TestSupport.expectEqual(gptOSS.includeReasoning, false)
         TestSupport.expectEqual(gptOSS.shouldStripThinkTags, false)
@@ -27,7 +27,7 @@ enum ModelConfigurationTests {
         // Regression: gpt-oss-120b sent no reasoning effort, so Groq used its
         // slower default instead of the low effort cleanup needs.
         let gptOSSLarge = ModelConfiguration.config(for: "openai/gpt-oss-120b")
-        TestSupport.expectEqual(gptOSSLarge.maxCompletionTokens, 4096)
+        TestSupport.expectEqual(gptOSSLarge.maxCompletionTokens, 16384)
         TestSupport.expectEqual(gptOSSLarge.reasoningEffort, "low")
         TestSupport.expectEqual(gptOSSLarge.includeReasoning, false)
         let largeOptions = ModelConfiguration.nonContentRequestOptions(model: "openai/gpt-oss-120b", temperature: 0)

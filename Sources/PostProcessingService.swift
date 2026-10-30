@@ -8,6 +8,8 @@ enum PostProcessingError: LocalizedError {
     case invalidResponse(String)
     case invalidInput(String)
     case emptyOutput
+    /// The model stopped at the output token limit, so the text is incomplete.
+    case truncatedOutput
     case requestTimedOut(TimeInterval)
     case suspectedInstructionExecution
 
@@ -23,6 +25,8 @@ enum PostProcessingError: LocalizedError {
             "Invalid post-processing input: \(details)"
         case .emptyOutput:
             "Post-processing returned empty output"
+        case .truncatedOutput:
+            "Post-processing output hit the token limit"
         case .requestTimedOut(let seconds):
             "Post-processing timed out after \(Int(seconds))s"
         case .suspectedInstructionExecution:
@@ -206,7 +210,7 @@ Behavior:
     private let defaultModel = "openai/gpt-oss-20b"
     private let defaultFallbackModel = "qwen/qwen3.8-27b"
     private let defaultModelReasoningEffort = "low"
-    private let postProcessingMaxCompletionTokens = 4096
+    private let postProcessingMaxCompletionTokens = 16384
     private var postProcessingTimeoutSeconds: TimeInterval {
         let override = UserDefaults.standard.double(forKey: "post_processing_timeout_seconds")
         return override > 0 ? override : 20
@@ -670,6 +674,9 @@ Model: \(model)
               let rawContent = message["content"] as? String else {
             throw PostProcessingError.invalidResponse("Missing choices[0].message.content")
         }
+        guard firstChoice["finish_reason"] as? String != "length" else {
+            throw PostProcessingError.truncatedOutput
+        }
 
         var content = rawContent
         if config.shouldStripThinkTags {
@@ -793,6 +800,9 @@ Model: \(model)
               let message = firstChoice["message"] as? [String: Any],
               let rawContent = message["content"] as? String else {
             throw PostProcessingError.invalidResponse("Missing choices[0].message.content")
+        }
+        guard firstChoice["finish_reason"] as? String != "length" else {
+            throw PostProcessingError.truncatedOutput
         }
 
         var content = rawContent
@@ -963,6 +973,9 @@ Model: \(model)
               let message = firstChoice["message"] as? [String: Any],
               let rawContent = message["content"] as? String else {
             throw PostProcessingError.invalidResponse("Missing choices[0].message.content")
+        }
+        guard firstChoice["finish_reason"] as? String != "length" else {
+            throw PostProcessingError.truncatedOutput
         }
 
         var content = rawContent

@@ -17,6 +17,7 @@ enum PostProcessingServiceTests {
         testDefaultPromptRestoresWrittenPunctuation()
         testSelfCorrectionsAreScoped()
         testFormattingPreferencesComeAfterAppStyle()
+        testTruncatedCleanupIsRejected()
     }
 
     // Regression: one "sorry" near the end of a long prompt dictation made the
@@ -229,12 +230,73 @@ enum PostProcessingServiceTests {
         )
     }
 
+    // Regression: a 4,096-token cap cut off cleanup of long dictations, and the
+    // partial text was pasted as if it were complete.
+    private static func testTruncatedCleanupIsRejected() {
+        let recorder = RequestRecorder()
+        let service = PostProcessingService(
+            apiKey: "synthetic-key",
+            baseURL: "https://example.invalid/v1",
+            preferredModel: "openai/gpt-oss-120b",
+            preferredFallbackModel: "synthetic-fallback",
+            transport: { request in
+                recorder.record(request.httpBody)
+                let body = try JSONSerialization.data(withJSONObject: [
+                    "choices": [["message": ["content": "The first half of a long"], "finish_reason": "length"]]
+                ])
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (body, response)
+            }
+        )
+        let context = AppContext(
+            appName: nil,
+            bundleIdentifier: nil,
+            windowTitle: nil,
+            selectedText: nil,
+            currentActivity: "",
+            contextSystemPrompt: nil,
+            contextPrompt: nil,
+            screenshotDataURL: nil,
+            screenshotMimeType: nil,
+            screenshotError: nil
+        )
+
+        let outcome = ErrorBox()
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            do {
+                _ = try await service.postProcess(
+                    transcript: "synthetic long transcript",
+                    context: context,
+                    customVocabulary: ""
+                )
+            } catch {
+                outcome.error = error
+            }
+            done.signal()
+        }
+        done.wait()
+
+        let requests = recorder.captured
+        TestSupport.expectEqual(requests.count, 1)
+        TestSupport.expectEqual(requests.first?.maxCompletionTokens, 16384)
+        guard case PostProcessingError.truncatedOutput? = outcome.error else {
+            TestSupport.expect(false, "Output cut off at the token limit must not be returned as a cleanup")
+            return
+        }
+    }
+
+    private final class ErrorBox: @unchecked Sendable {
+        var error: Error?
+    }
+
     // MARK: - Request capture
 
     private struct CapturedRequest {
         let model: String
         let systemPrompt: String
         let userMessage: String
+        let maxCompletionTokens: Int?
     }
 
     private final class RequestRecorder: @unchecked Sendable {
@@ -258,7 +320,8 @@ enum PostProcessingServiceTests {
                 return CapturedRequest(
                     model: json["model"] as? String ?? "",
                     systemPrompt: system?["content"] as? String ?? "",
-                    userMessage: user?["content"] as? String ?? ""
+                    userMessage: user?["content"] as? String ?? "",
+                    maxCompletionTokens: json["max_completion_tokens"] as? Int
                 )
             }
         }

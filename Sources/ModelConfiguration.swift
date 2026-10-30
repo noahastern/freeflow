@@ -81,14 +81,14 @@ public struct ModelConfiguration {
         
         if cleanModel == "openai/gpt-oss-20b" {
             return ModelConfig(
-                maxCompletionTokens: 4096,
+                maxCompletionTokens: 16384,
                 reasoningEffort: "low",
                 includeReasoning: false,
                 shouldStripThinkTags: false
             )
         } else if cleanModel == "openai/gpt-oss-120b" {
             return ModelConfig(
-                maxCompletionTokens: 4096,
+                maxCompletionTokens: 16384,
                 reasoningEffort: "low",
                 includeReasoning: false,
                 shouldStripThinkTags: false
