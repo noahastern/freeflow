@@ -28,6 +28,9 @@ struct FreeFlowTests {
         await RawTranscriptResolverTests.run()
         await APIConfigurationDraftTests.run()
         VocabularyPromptTests.run()
+        VocabularyCorrectionCoreTests.run()
+        CorrectionRegionCoreTests.run()
+        LearnedCorrectionTests.run()
         print("FreeFlowTests passed")
     }
 }

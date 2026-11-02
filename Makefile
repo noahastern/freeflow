@@ -17,6 +17,10 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/APIConfigurationDraft.swift \
 	Sources/AlertSoundPreference.swift \
 	Sources/VocabularyPrompt.swift \
+	Sources/VocabularyCorrectionCore.swift \
+	Sources/CorrectionRegionCore.swift \
+	Sources/LearnedCorrectionStore.swift \
+	Sources/LearnedCorrectionApplier.swift \
 	Sources/AppContextService.swift \
 	Sources/AppName.swift \
 	Sources/AppStyle.swift \
