@@ -12,6 +12,7 @@ struct FreeFlowTests {
         TemperatureCapabilityCacheTests.run()
         ModelConfigurationTests.run()
         OverlayPlacementPreferenceTests.run()
+        EscapeUndoCoreTests.run()
         RecordingCaptureTimingTests.run()
         RecordingTimerPreferenceTests.run()
         MicrophoneReadinessPreferenceTests.run()
