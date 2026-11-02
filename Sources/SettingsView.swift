@@ -727,6 +727,9 @@ struct GeneralSettingsView: View {
                 SettingsCard("Cleanup", icon: "sparkles") {
                     cleanupSection
                 }
+                SettingsCard("Screen Context", icon: "eye.fill") {
+                    screenContextSection
+                }
                 SettingsCard("Text insertion", icon: "text.cursor") {
                     textInsertionSection
                 }
@@ -1325,6 +1328,19 @@ struct GeneralSettingsView: View {
             get: { appState.formattingPreferences.amount(for: element) },
             set: { appState.formattingPreferences.setAmount($0, for: element) }
         )
+    }
+
+    // MARK: Screen context
+
+    private var screenContextSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle("Use screen context", isOn: $appState.screenContextEnabled)
+
+            Text("Takes a screenshot of the active window while you dictate and asks the context model to describe it, so cleanup can spell names and match the conversation. Turn this off for faster cleanup and to stop sending screenshots: \(AppName.displayName) then uses only the app name and window title, which per-app styles need. Applies to new dictations.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: Text insertion

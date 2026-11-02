@@ -1274,7 +1274,7 @@ struct SetupView: View {
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                     testPhase = .transcribing
                 }
-                recorder.stopRecording { url in
+                recorder.stopRecording { url, compressedURL in
                     guard let url else {
                         Task { @MainActor in
                             testHotkeyHarness.isTranscribing = false
@@ -1293,7 +1293,7 @@ struct SetupView: View {
                     Task {
                         do {
                             let service = try appState.makeTranscriptionService()
-                            let transcript = try await service.transcribe(fileURL: url)
+                            let transcript = try await service.transcribe(fileURL: url, compressedFileURL: compressedURL)
                             await MainActor.run {
                                 testHotkeyHarness.isTranscribing = false
                                 testAudioRecorder = nil

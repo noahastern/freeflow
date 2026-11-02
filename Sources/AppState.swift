@@ -458,6 +458,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Off skips the screenshot and the context model call for new dictations.
+    @Published var screenContextEnabled: Bool {
+        didSet {
+            ScreenContextPreference.save(screenContextEnabled, to: .standard)
+        }
+    }
+
     @Published var desktopScreenshotFallbackEnabled: Bool {
         didSet {
             DesktopScreenshotFallbackPreference.save(desktopScreenshotFallbackEnabled, to: .standard)
@@ -660,6 +667,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var transcribingAudioFileName: String?
     private var contextService: AppContextService
     private var contextCaptureTask: Task<AppContext?, Never>?
+    /// Lets a capture that finishes after its dictation ended skip publishing
+    /// into the next dictation's state.
+    private var contextCaptureGeneration = 0
     private var capturedContext: AppContext?
     private var hasShownScreenshotPermissionAlert = false
     private var audioDeviceObservers: [NSObjectProtocol] = []
@@ -674,6 +684,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var textInsertionTargetID: UUID?
     private var currentSessionIntent: SessionIntent = .dictation
     private var pendingSelectionSnapshot: AppSelectionSnapshot?
+    /// Timings for the dictation whose paste is waiting on shortcut release.
+    private var pendingLatencyTimeline: DictationLatencyTimeline?
     private var pendingManualCommandInvocation = false
     private var pendingShortcutStartTask: Task<Void, Never>?
     private var pendingShortcutStartMode: RecordingTriggerMode?
@@ -832,6 +844,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.customContextPrompt = customContextPrompt
         self.instructionExecutionGuardEnabled = instructionExecutionGuardEnabled
         self.desktopScreenshotFallbackEnabled = desktopScreenshotFallbackEnabled
+        self.screenContextEnabled = ScreenContextPreference.load(from: .standard)
         self.contextScreenshotMaxDimension = contextScreenshotMaxDimension
         self.customSystemPromptLastModified = customSystemPromptLastModified
         self.customContextPromptLastModified = customContextPromptLastModified
@@ -1370,7 +1383,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     formattingPreferences: self.formattingPreferences,
                     outputLanguage: self.outputLanguage,
                     dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
-                    cleanupLevel: self.cleanupLevel
+                    cleanupLevel: self.cleanupLevel,
+                    pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste
                 )
                 finalTranscript = result.finalTranscript
                 processingStatus = Self.statusMessage(
@@ -2448,6 +2462,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         let timingGeneration = audioRecorder.prepareRecordingTiming()
         noteMicrophoneUse()
+        // Warm TLS to the providers while the user speaks. Sends no user content.
+        LLMAPITransport.preconnect(to: [resolvedTranscriptionBaseURL, apiBaseURL])
 
         // Show the pill as soon as the shortcut fires so the app never looks
         // like it is loading; the waveform stays flat until the microphone is live.
@@ -2672,6 +2688,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case postProcessingSucceeded
         case postProcessingFailedFallback
         case preservedExactWording
+        case skippedCleanupAlreadyClean
         case preservedExactWordingTranslated
         case preservedExactWordingTranslationFailedFallback
         case commandModeSucceeded(invocation: CommandInvocation)
@@ -2691,6 +2708,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     : "Post-processing failed, using raw transcript"
             case .preservedExactWording:
                 return "Preserved exact wording, skipped post-processing"
+            case .skippedCleanupAlreadyClean:
+                return "Short transcript already clean, skipped post-processing"
             case .preservedExactWordingTranslated:
                 return "Preserved exact wording, translated to output language"
             case .preservedExactWordingTranslationFailedFallback:
@@ -2714,7 +2733,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         formattingPreferences: FormattingPreferences,
         outputLanguage: String = "",
         dictationLanguage: String = "",
-        cleanupLevel: CleanupLevel
+        cleanupLevel: CleanupLevel,
+        pressesEnterAfterPaste: Bool
     ) async -> (finalTranscript: String, outcome: TranscriptProcessingOutcome, prompt: String) {
         let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -2773,6 +2793,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
+        let bypassSettings = CleanupBypass.Settings(
+            cleanupLevel: cleanupLevel,
+            outputLanguage: outputLanguage,
+            dictationLanguage: dictationLanguage,
+            isEditMode: intent.isCommandMode,
+            pressesEnterAfterPaste: pressesEnterAfterPaste,
+            customSystemPrompt: customSystemPrompt,
+            formattingPrompt: formattingPreferences.promptSection,
+            styleAllowsVerbatim: CleanupBypass.styleAllowsVerbatim(
+                bundleIdentifier: context.bundleIdentifier,
+                windowTitle: context.windowTitle,
+                settings: appStyleSettings
+            ),
+            vocabularyTerms: VocabularyList.terms(from: customVocabulary)
+        )
+        if CleanupBypass.canSkipCleanup(transcript: trimmedRawTranscript, settings: bypassSettings) {
+            return (trimmedRawTranscript, .skippedCleanupAlreadyClean, "")
+        }
+
         do {
             let result = try await postProcessingService.postProcess(
                 transcript: trimmedRawTranscript,
@@ -2809,7 +2848,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         realtimeService: RealtimeTranscriptionService?,
         fileService: TranscriptionService,
         mainProviderFallback: TranscriptionService?,
-        fileURL: URL
+        fileURL: URL,
+        compressedFileURL: URL? = nil
     ) async throws -> String {
         var realtime: (() async throws -> String)?
         if let realtimeService {
@@ -2826,12 +2866,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         var mainProvider: (() async throws -> String)?
         if let mainProviderFallback {
-            mainProvider = { try await mainProviderFallback.transcribe(fileURL: fileURL) }
+            mainProvider = {
+                try await mainProviderFallback.transcribe(fileURL: fileURL, compressedFileURL: compressedFileURL)
+            }
         }
         let resolver = RawTranscriptResolver(
             realtime: realtime,
             realtimeReachedServer: { realtimeService?.hasReceivedServerEvent ?? false },
-            transcriptionEndpoint: { try await fileService.transcribe(fileURL: fileURL) },
+            transcriptionEndpoint: {
+                try await fileService.transcribe(fileURL: fileURL, compressedFileURL: compressedFileURL)
+            },
             mainProvider: mainProvider
         )
         return try await resolver.resolve { source in
@@ -2840,6 +2884,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func stopAndTranscribe() {
+        let keyReleaseTimeline = DictationLatencyTimeline(keyReleasedAt: DictationLatencyTimeline.now())
+        pendingLatencyTimeline = nil
         cancelPendingShortcutStart()
         shortcutSessionController.reset()
         let textInsertionTarget = activeTextInsertionTarget
@@ -2858,6 +2904,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let inFlightContextTask = contextCaptureTask
         capturedContext = nil
         contextCaptureTask = nil
+        contextCaptureGeneration &+= 1
         lastRawTranscript = ""
         lastPostProcessedTranscript = ""
         lastContextSummary = ""
@@ -2872,7 +2919,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         errorMessage = nil
         playAlertSound(named: stopSound)
         overlayManager.showTranscribing()
-        audioRecorder.stopRecording { [weak self] fileURL in
+        audioRecorder.stopRecording { [weak self] fileURL, compressedFileURL in
             guard let self else { return }
             guard let fileURL else {
                 self.isTranscribing = false
@@ -2892,6 +2939,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return
             }
 
+            var finalizedTimeline = keyReleaseTimeline
+            finalizedTimeline.mark(.audioFinalized)
+            finalizedTimeline.wavBytes = DictationLatencyTimeline.fileSize(at: fileURL)
+            finalizedTimeline.flacBytes = DictationLatencyTimeline.fileSize(at: compressedFileURL)
             let savedAudioFile = Self.saveAudioFile(from: fileURL)
             let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
             self.transcribingAudioFileName = savedAudioFile?.fileName
@@ -2931,9 +2982,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         realtimeService: activeRealtime,
                         fileService: transcriptionService,
                         mainProviderFallback: self.makeMainProviderTranscriptionFallback(),
-                        fileURL: transcriptionFileURL
+                        fileURL: transcriptionFileURL,
+                        compressedFileURL: compressedFileURL
                     )
                     let rawTranscript = try await transcript
+                    var timeline = finalizedTimeline
+                    timeline.mark(.transcriptReceived)
                     let parsedTranscript = Self.parseTranscriptCommands(
                         from: rawTranscript,
                         pressEnterCommandEnabled: self.isPressEnterVoiceCommandEnabled
@@ -2949,14 +3003,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             self?.lastTranscript = bootstrapTranscript
                         }
                     }
-                    let appContext: AppContext
-                    if let sessionContext {
-                        appContext = sessionContext
-                    } else if let inFlightContext = await inFlightContextTask?.value {
-                        appContext = inFlightContext
-                    } else {
-                        appContext = self.fallbackContextAtStop()
-                    }
+                    let appContext = await self.resolveSessionContext(
+                        sessionContext,
+                        inFlight: inFlightContextTask
+                    )
+                    timeline.mark(.contextReady)
                     try Task.checkCancellation()
                     await MainActor.run { [weak self] in
                         self?.debugStatusMessage = "Running post-processing"
@@ -2972,8 +3023,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         formattingPreferences: self.formattingPreferences,
                         outputLanguage: self.outputLanguage,
                         dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
-                        cleanupLevel: self.cleanupLevel
+                        cleanupLevel: self.cleanupLevel,
+                        pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste
                     )
+                    timeline.mark(.cleanupDone)
+                    let cleanedTimeline = timeline
                     try Task.checkCancellation()
 
                     await MainActor.run {
@@ -3027,6 +3081,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         }
 
                         if trimmedFinalTranscript.isEmpty {
+                            Self.logLatency(cleanedTimeline)
                             self.statusText = shouldPressEnterAfterPaste ? enterOnlyStatusText : "Nothing to transcribe"
                             self.clearPendingOverlayDismissToken()
                             if !self.showPostTranscriptionUpdateReminderIfNeeded() {
@@ -3056,6 +3111,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 }
                             }
 
+                            // Logged once the paste runs, in performAfterShortcutReleased.
+                            self.pendingLatencyTimeline = cleanedTimeline
                             self.insertTranscriptWhenShortcutReleased(
                                 trimmedFinalTranscript, target: textInsertionTarget,
                                 shouldPressEnter: shouldPressEnterAfterPaste,
@@ -3074,14 +3131,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         self.endCriticalDictationActivity()
                     }
                 } catch {
-                    let resolvedContext: AppContext
-                    if let sessionContext {
-                        resolvedContext = sessionContext
-                    } else if let inFlightContext = await inFlightContextTask?.value {
-                        resolvedContext = inFlightContext
-                    } else {
-                        resolvedContext = self.fallbackContextAtStop()
-                    }
+                    let resolvedContext = await self.resolveSessionContext(
+                        sessionContext,
+                        inFlight: inFlightContextTask
+                    )
                     await MainActor.run {
                         guard self.isTranscribing else { return }
                         self.transcriptionTask = nil
@@ -3204,15 +3257,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func startContextCapture() {
         contextCaptureTask?.cancel()
         capturedContext = nil
-        lastContextSummary = "Collecting app context..."
+        contextCaptureGeneration &+= 1
+        let generation = contextCaptureGeneration
+        let usesScreenContext = screenContextEnabled
+        lastContextSummary = usesScreenContext ? "Collecting app context..." : "Screen context is off"
         lastPostProcessingStatus = ""
         lastContextScreenshotDataURL = nil
-        lastContextScreenshotStatus = "Collecting screenshot..."
+        lastContextScreenshotStatus = usesScreenContext ? "Collecting screenshot..." : "Screen context is off"
 
         contextCaptureTask = Task { [weak self] in
             guard let self else { return nil }
-            let context = await self.contextService.collectContext()
+            let context = usesScreenContext
+                ? await self.contextService.collectContext()
+                : self.contextService.collectLocalContext()
+            let isCancelled = Task.isCancelled
             await MainActor.run {
+                // A capture that outlived its dictation must not leak into the next one.
+                guard generation == self.contextCaptureGeneration, !isCancelled else { return }
                 self.capturedContext = context
                 self.lastContextSummary = context.contextSummary
                 self.lastContextScreenshotDataURL = context.screenshotDataURL
@@ -3224,10 +3285,32 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.lastContextSelectedText = context.selectedText ?? ""
                 self.lastContextLLMPrompt = context.contextPrompt ?? ""
                 self.lastPostProcessingStatus = "App context captured"
-                self.handleScreenshotCaptureIssue(context.screenshotError)
+                if usesScreenContext {
+                    self.handleScreenshotCaptureIssue(context.screenshotError)
+                }
             }
             return context
         }
+    }
+
+    /// Once the transcript is ready, waits at most `ContextWaitRace.defaultDeadline`
+    /// for an unfinished capture, then cancels it and uses the cheap local fallback.
+    private func resolveSessionContext(
+        _ sessionContext: AppContext?,
+        inFlight: Task<AppContext?, Never>?
+    ) async -> AppContext {
+        if let sessionContext { return sessionContext }
+        if let inFlight {
+            if let context = await ContextWaitRace.value(
+                of: { await inFlight.value },
+                deadline: ContextWaitRace.defaultDeadline
+            ) {
+                return context
+            }
+            inFlight.cancel()
+            os_log(.info, log: recordingLog, "context not ready within deadline; using local fallback")
+        }
+        return fallbackContextAtStop()
     }
 
     private func fallbackContextAtStop() -> AppContext {
@@ -3853,9 +3936,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + pasteAfterShortcutReleaseDelay) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + pasteAfterShortcutReleaseDelay) { [weak self] in
             action()
+            self?.logPendingLatencyAfterPaste()
         }
+    }
+
+    private func logPendingLatencyAfterPaste() {
+        guard var timeline = pendingLatencyTimeline else { return }
+        pendingLatencyTimeline = nil
+        timeline.mark(.pasted)
+        Self.logLatency(timeline)
+    }
+
+    /// One line per dictation: integer milliseconds and byte counts only, never text.
+    private static func logLatency(_ timeline: DictationLatencyTimeline) {
+        os_log(.info, log: recordingLog, "dictation latency %{public}@", timeline.logLine)
     }
 
     private func pasteAtCursorWhenShortcutReleased(completion: (() -> Void)? = nil) {

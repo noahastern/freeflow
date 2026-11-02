@@ -20,10 +20,13 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/AppContextService.swift \
 	Sources/AppName.swift \
 	Sources/AppStyle.swift \
+	Sources/CleanupBypass.swift \
+	Sources/DictationLatency.swift \
 	Sources/CleanupLevel.swift \
 	Sources/FormattingPreferences.swift \
 	Sources/AppTextInsertionCore.swift \
 	Sources/AppTextInsertionTarget.swift \
+	Sources/AudioUploadEncoding.swift \
 	Sources/ContextInferenceFailure.swift \
 	Sources/LLMAPITransport.swift \
 	Sources/LLMCooldownManager.swift \
@@ -35,6 +38,7 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/RecordingCaptureTiming.swift \
 	Sources/RawTranscriptResolver.swift \
 	Sources/RecordingTimerPreference.swift \
+	Sources/ScreenContextPreference.swift \
 	Sources/TranscriptionErrorPresentationCore.swift \
 	Sources/TranscriptTextCore.swift \
 	Sources/TemperatureCapabilityCache.swift \

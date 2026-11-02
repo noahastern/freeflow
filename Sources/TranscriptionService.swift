@@ -60,6 +60,7 @@ class TranscriptionService {
     private let baseURL: URL
     private let transcriptionModel: String
     private let language: String?
+    private let sessionPool: LLMSessionPool
     private var transcriptionResponseFormat: String {
         Self.responseFormat(forModel: transcriptionModel)
     }
@@ -72,9 +73,11 @@ class TranscriptionService {
         apiKey: String,
         baseURL: String = "https://api.groq.com/openai/v1",
         transcriptionModel: String = "whisper-large-v3",
-        language: String? = nil
+        language: String? = nil,
+        sessionPool: LLMSessionPool = .shared
     ) throws {
         self.apiKey = apiKey
+        self.sessionPool = sessionPool
         self.baseURL = try Self.normalizedBaseURL(from: baseURL)
         let trimmedModel = transcriptionModel.trimmingCharacters(in: .whitespacesAndNewlines)
         self.transcriptionModel = trimmedModel.isEmpty ? "whisper-large-v3" : trimmedModel
@@ -112,8 +115,10 @@ class TranscriptionService {
         }
     }
 
-    // Upload audio file, submit for transcription, poll until done, return text
-    func transcribe(fileURL: URL) async throws -> String {
+    // Upload audio file, submit for transcription, poll until done, return text.
+    // `compressedFileURL` is a smaller FLAC copy of `fileURL` sent in its place;
+    // if it cannot be read or the provider rejects it, the WAV is sent instead.
+    func transcribe(fileURL: URL, compressedFileURL: URL? = nil) async throws -> String {
         guard !Task.isCancelled else {
             throw CancellationError()
         }
@@ -130,7 +135,10 @@ class TranscriptionService {
                         guard let self else {
                             throw TranscriptionError.transcriptionFailed("Transcription service deallocated")
                         }
-                        let result = try await self.transcribeAudio(fileURL: fileURL)
+                        let result = try await self.transcribeAudio(
+                            fileURL: fileURL,
+                            compressedFileURL: compressedFileURL
+                        )
                         raceState.finish(.success(result))
                     } catch {
                         raceState.finish(.failure(Self.transcriptionTimeoutErrorIfNeeded(
@@ -157,12 +165,37 @@ class TranscriptionService {
         }
     }
 
-    // Send audio file for transcription and return text
-    private func transcribeAudio(fileURL: URL) async throws -> String {
-        return try await transcribeAudioWithURLSession(fileURL: fileURL)
+    /// Statuses a provider may return for an audio format it does not accept.
+    static func isUnsupportedUploadFormatStatus(_ status: Int) -> Bool {
+        status == 400 || status == 415
     }
 
-    private func transcribeAudioWithURLSession(fileURL: URL) async throws -> String {
+    private struct CompressedUploadRejected: Error {
+        let status: Int
+    }
+
+    // Send audio file for transcription and return text
+    private func transcribeAudio(fileURL: URL, compressedFileURL: URL?) async throws -> String {
+        if let compressedFileURL,
+           let size = (try? FileManager.default.attributesOfItem(atPath: compressedFileURL.path))?[.size] as? NSNumber,
+           size.int64Value > 0 {
+            do {
+                return try await transcribeAudioWithURLSession(fileURL: compressedFileURL, isCompressedCopy: true)
+            } catch let rejected as CompressedUploadRejected {
+                os_log(
+                    .error,
+                    log: transcriptionLog,
+                    "provider rejected FLAC upload (HTTP %ld); retrying with WAV",
+                    rejected.status
+                )
+            } catch is CocoaError {
+                os_log(.error, log: transcriptionLog, "FLAC upload unreadable; using WAV")
+            }
+        }
+        return try await transcribeAudioWithURLSession(fileURL: fileURL, isCompressedCopy: false)
+    }
+
+    private func transcribeAudioWithURLSession(fileURL: URL, isCompressedCopy: Bool) async throws -> String {
         let url = baseURL
             .appendingPathComponent("audio")
             .appendingPathComponent("transcriptions")
@@ -184,8 +217,14 @@ class TranscriptionService {
         )
 
         do {
-            let (data, response) = try await LLMAPITransport.upload(for: request, from: body)
+            let (data, response) = try await LLMAPITransport.upload(for: request, from: body, pool: sessionPool)
+            if isCompressedCopy, let status = (response as? HTTPURLResponse)?.statusCode,
+               Self.isUnsupportedUploadFormatStatus(status) {
+                throw CompressedUploadRejected(status: status)
+            }
             return try validateTranscriptionResponse(data: data, response: response, fileURL: fileURL)
+        } catch let rejected as CompressedUploadRejected {
+            throw rejected
         } catch {
             let nsError = error as NSError
             os_log(
@@ -226,18 +265,6 @@ class TranscriptionService {
 
         return try parseTranscript(from: data)
     }
-    private func audioContentType(for fileName: String) -> String {
-        if fileName.lowercased().hasSuffix(".wav") {
-            return "audio/wav"
-        }
-        if fileName.lowercased().hasSuffix(".mp3") {
-            return "audio/mpeg"
-        }
-        if fileName.lowercased().hasSuffix(".m4a") {
-            return "audio/mp4"
-        }
-        return "audio/mp4"
-    }
 
     private func fileSizeBytes(for fileURL: URL) -> Int64 {
         let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
@@ -274,7 +301,7 @@ class TranscriptionService {
 
         append("--\(boundary)\r\n")
         append("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n")
-        append("Content-Type: \(audioContentType(for: fileName))\r\n\r\n")
+        append("Content-Type: \(AudioUploadFormat.contentType(forFileName: fileName))\r\n\r\n")
         body.append(audioData)
         append("\r\n")
         append("--\(boundary)--\r\n")

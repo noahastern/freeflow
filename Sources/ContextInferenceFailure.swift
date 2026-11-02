@@ -10,6 +10,10 @@ enum ContextInferenceFailure: Error {
     case network
     case missingAPIKey
 
+    /// Stored as the activity when screen context is off. It is not a summary,
+    /// so cleanup leaves it out of the prompt.
+    static let screenContextDisabledSummary = "Screen context is off; using app metadata only."
+
     var summary: String {
         let reason: String
         switch self {
@@ -38,6 +42,7 @@ enum ContextInferenceFailure: Error {
             || value.hasPrefix("Could not reliably infer a two-sentence summary")
             || value.hasPrefix("Could not refresh app context at stop time;")
             || value == "You are dictating in an unrecognized context."
+            || value == screenContextDisabledSummary
     }
 
     static func promptSection(for summary: String) -> String {
