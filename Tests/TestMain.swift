@@ -9,6 +9,7 @@ struct FreeFlowTests {
         FormattingPreferencesTests.run()
         AppContextServiceTests.run()
         await LLMAPITransportTests.run()
+        await LLMSessionPoolTests.run()
         TemperatureCapabilityCacheTests.run()
         ModelConfigurationTests.run()
         OverlayPlacementPreferenceTests.run()

@@ -2459,6 +2459,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
         let timingGeneration = audioRecorder.prepareRecordingTiming()
         noteMicrophoneUse()
+        // Warm TLS to the providers while the user speaks. Sends no user content.
+        LLMAPITransport.preconnect(to: [resolvedTranscriptionBaseURL, apiBaseURL])
 
         // Show the pill as soon as the shortcut fires so the app never looks
         // like it is loading; the waveform stays flat until the microphone is live.
