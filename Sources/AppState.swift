@@ -2846,7 +2846,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         realtimeService: RealtimeTranscriptionService?,
         fileService: TranscriptionService,
         mainProviderFallback: TranscriptionService?,
-        fileURL: URL
+        fileURL: URL,
+        compressedFileURL: URL? = nil
     ) async throws -> String {
         var realtime: (() async throws -> String)?
         if let realtimeService {
@@ -2863,12 +2864,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         var mainProvider: (() async throws -> String)?
         if let mainProviderFallback {
-            mainProvider = { try await mainProviderFallback.transcribe(fileURL: fileURL) }
+            mainProvider = {
+                try await mainProviderFallback.transcribe(fileURL: fileURL, compressedFileURL: compressedFileURL)
+            }
         }
         let resolver = RawTranscriptResolver(
             realtime: realtime,
             realtimeReachedServer: { realtimeService?.hasReceivedServerEvent ?? false },
-            transcriptionEndpoint: { try await fileService.transcribe(fileURL: fileURL) },
+            transcriptionEndpoint: {
+                try await fileService.transcribe(fileURL: fileURL, compressedFileURL: compressedFileURL)
+            },
             mainProvider: mainProvider
         )
         return try await resolver.resolve { source in
@@ -2910,7 +2915,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         errorMessage = nil
         playAlertSound(named: stopSound)
         overlayManager.showTranscribing()
-        audioRecorder.stopRecording { [weak self] fileURL in
+        audioRecorder.stopRecording { [weak self] fileURL, compressedFileURL in
             guard let self else { return }
             guard let fileURL else {
                 self.isTranscribing = false
@@ -2969,7 +2974,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         realtimeService: activeRealtime,
                         fileService: transcriptionService,
                         mainProviderFallback: self.makeMainProviderTranscriptionFallback(),
-                        fileURL: transcriptionFileURL
+                        fileURL: transcriptionFileURL,
+                        compressedFileURL: compressedFileURL
                     )
                     let rawTranscript = try await transcript
                     let parsedTranscript = Self.parseTranscriptCommands(

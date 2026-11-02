@@ -5,6 +5,7 @@ struct FreeFlowTests {
     static func main() async {
         AlertSoundPreferenceTests.run()
         AppStyleTests.run()
+        await AudioUploadEncodingTests.run()
         CleanupLevelTests.run()
         CleanupBypassTests.run()
         FormattingPreferencesTests.run()

@@ -75,6 +75,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private var audioDataOutput: AVCaptureAudioDataOutput?
     private var sessionObservers: [NSObjectProtocol] = []
     private var tempFileURL: URL?
+    /// FLAC companion of `tempFileURL` for upload, when encoding succeeded. Session-queue confined.
+    private var compressedFileURL: URL?
     private var recordingStartTime: CFAbsoluteTime = 0
     private let _bufferCount = OSAllocatedUnfairLock(initialState: 0)
     private let fileWriteErrorLock = OSAllocatedUnfairLock(initialState: ())
@@ -82,6 +84,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
     private let sessionQueue = DispatchQueue(label: "com.zachlatta.freeflow.capture.session")
     private let sampleBufferQueue = DispatchQueue(label: "com.zachlatta.freeflow.capture.samples")
     private var activeAudioFile: AVAudioFile?
+    /// Sample-buffer-queue confined, like `activeAudioFile`.
+    private var activeFLACWriter: StreamingFLACWriter?
     private var activeAudioFormat: AVAudioFormat?
     private var recordedFrameCount: AVAudioFramePosition = 0
     private var loggedCaptureFormat = false
@@ -301,6 +305,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         var finalizedURL: URL?
         var shouldKeepFile = false
 
+        var finalizedCompressedURL: URL?
+
         // Drain all queued sample-buffer callbacks before releasing the writer.
         sampleBufferQueue.sync {
             finalizedURL = self.tempFileURL
@@ -309,7 +315,14 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             }
             self.activeAudioFile = nil
             self.activeAudioFormat = nil
+            if shouldKeepFile {
+                finalizedCompressedURL = self.activeFLACWriter?.finish(expectedFrameCount: self.recordedFrameCount)
+            } else {
+                self.activeFLACWriter?.discard()
+            }
+            self.activeFLACWriter = nil
         }
+        compressedFileURL = finalizedCompressedURL
 
         defer {
             self.recordedFrameCount = 0
@@ -412,6 +425,13 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             activeAudioFile = audioFile
             activeAudioFormat = targetFormat
             os_log(.info, log: recordingLog, "audio file writer created at %{public}@", outputURL.path)
+            activeFLACWriter = StreamingFLACWriter(
+                url: AudioUploadFormat.flacURL(besideWAV: outputURL),
+                format: targetFormat
+            )
+            if activeFLACWriter == nil {
+                os_log(.info, log: recordingLog, "FLAC encoder unavailable; uploading WAV")
+            }
         }
 
         guard let activeAudioFile else {
@@ -421,6 +441,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         if sourceFormat == targetFormat {
             try activeAudioFile.write(from: inputBuffer)
             recordedFrameCount += AVAudioFramePosition(inputBuffer.frameLength)
+            activeFLACWriter?.write(inputBuffer)
             return
         }
 
@@ -432,6 +453,7 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         guard outputBuffer.frameLength > 0 else { return }
         try activeAudioFile.write(from: outputBuffer)
         recordedFrameCount += AVAudioFramePosition(outputBuffer.frameLength)
+        activeFLACWriter?.write(outputBuffer)
     }
 
     private func validatedPCMBufferFormat(
@@ -652,6 +674,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         sampleBufferQueue.sync {
             self.activeAudioFile = nil
             self.activeAudioFormat = nil
+            self.activeFLACWriter?.discard()
+            self.activeFLACWriter = nil
             self.recordingConverterLock.withLock { $0 = nil }
             self.pcm16ConverterLock.withLock { $0 = nil }
             self.recordedFrameCount = 0
@@ -770,7 +794,8 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
         os_log(.info, log: recordingLog, "startRecording() complete: %.3fms total", (CFAbsoluteTimeGetCurrent() - t0) * 1000)
     }
 
-    func stopRecording(completion: @escaping (URL?) -> Void) {
+    /// Delivers the WAV recording and, when encoding succeeded, its FLAC companion.
+    func stopRecording(completion: @escaping (_ wavURL: URL?, _ compressedURL: URL?) -> Void) {
         captureTiming.withLock { $0.invalidate() }
         let count = _bufferCount.withLock { $0 }
         let elapsed = (CFAbsoluteTimeGetCurrent() - recordingStartTime) * 1000
@@ -780,12 +805,13 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             self.cancelWatchdog()
             self.endCaptureLocked()
             let outputURL = self.finishAudioFileLocked(discard: false)
+            let compressedURL = outputURL == nil ? nil : self.compressedFileURL
             self._recording.withLock { $0 = false }
             self.liveLevelNormalizerLock.withLock { $0.reset() }
             DispatchQueue.main.async {
                 self.isRecording = false
                 self.audioLevel = 0.0
-                completion(outputURL)
+                completion(outputURL, compressedURL)
             }
         }
     }
@@ -813,6 +839,10 @@ final class AudioRecorder: NSObject, ObservableObject, AVCaptureAudioDataOutputS
             if let url = self.tempFileURL {
                 try? FileManager.default.removeItem(at: url)
                 self.tempFileURL = nil
+            }
+            if let url = self.compressedFileURL {
+                try? FileManager.default.removeItem(at: url)
+                self.compressedFileURL = nil
             }
         }
 
