@@ -35,6 +35,7 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/RecordingCaptureTiming.swift \
 	Sources/RawTranscriptResolver.swift \
 	Sources/RecordingTimerPreference.swift \
+	Sources/ScreenContextPreference.swift \
 	Sources/TranscriptionErrorPresentationCore.swift \
 	Sources/TranscriptTextCore.swift \
 	Sources/TemperatureCapabilityCache.swift \

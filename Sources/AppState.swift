@@ -458,6 +458,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Off skips the screenshot and the context model call for new dictations.
+    @Published var screenContextEnabled: Bool {
+        didSet {
+            ScreenContextPreference.save(screenContextEnabled, to: .standard)
+        }
+    }
+
     @Published var desktopScreenshotFallbackEnabled: Bool {
         didSet {
             DesktopScreenshotFallbackPreference.save(desktopScreenshotFallbackEnabled, to: .standard)
@@ -660,6 +667,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var transcribingAudioFileName: String?
     private var contextService: AppContextService
     private var contextCaptureTask: Task<AppContext?, Never>?
+    /// Lets a capture that finishes after its dictation ended skip publishing
+    /// into the next dictation's state.
+    private var contextCaptureGeneration = 0
     private var capturedContext: AppContext?
     private var hasShownScreenshotPermissionAlert = false
     private var audioDeviceObservers: [NSObjectProtocol] = []
@@ -832,6 +842,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.customContextPrompt = customContextPrompt
         self.instructionExecutionGuardEnabled = instructionExecutionGuardEnabled
         self.desktopScreenshotFallbackEnabled = desktopScreenshotFallbackEnabled
+        self.screenContextEnabled = ScreenContextPreference.load(from: .standard)
         self.contextScreenshotMaxDimension = contextScreenshotMaxDimension
         self.customSystemPromptLastModified = customSystemPromptLastModified
         self.customContextPromptLastModified = customContextPromptLastModified
@@ -2858,6 +2869,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let inFlightContextTask = contextCaptureTask
         capturedContext = nil
         contextCaptureTask = nil
+        contextCaptureGeneration &+= 1
         lastRawTranscript = ""
         lastPostProcessedTranscript = ""
         lastContextSummary = ""
@@ -2949,14 +2961,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                             self?.lastTranscript = bootstrapTranscript
                         }
                     }
-                    let appContext: AppContext
-                    if let sessionContext {
-                        appContext = sessionContext
-                    } else if let inFlightContext = await inFlightContextTask?.value {
-                        appContext = inFlightContext
-                    } else {
-                        appContext = self.fallbackContextAtStop()
-                    }
+                    let appContext = await self.resolveSessionContext(
+                        sessionContext,
+                        inFlight: inFlightContextTask
+                    )
                     try Task.checkCancellation()
                     await MainActor.run { [weak self] in
                         self?.debugStatusMessage = "Running post-processing"
@@ -3074,14 +3082,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         self.endCriticalDictationActivity()
                     }
                 } catch {
-                    let resolvedContext: AppContext
-                    if let sessionContext {
-                        resolvedContext = sessionContext
-                    } else if let inFlightContext = await inFlightContextTask?.value {
-                        resolvedContext = inFlightContext
-                    } else {
-                        resolvedContext = self.fallbackContextAtStop()
-                    }
+                    let resolvedContext = await self.resolveSessionContext(
+                        sessionContext,
+                        inFlight: inFlightContextTask
+                    )
                     await MainActor.run {
                         guard self.isTranscribing else { return }
                         self.transcriptionTask = nil
@@ -3204,15 +3208,23 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func startContextCapture() {
         contextCaptureTask?.cancel()
         capturedContext = nil
-        lastContextSummary = "Collecting app context..."
+        contextCaptureGeneration &+= 1
+        let generation = contextCaptureGeneration
+        let usesScreenContext = screenContextEnabled
+        lastContextSummary = usesScreenContext ? "Collecting app context..." : "Screen context is off"
         lastPostProcessingStatus = ""
         lastContextScreenshotDataURL = nil
-        lastContextScreenshotStatus = "Collecting screenshot..."
+        lastContextScreenshotStatus = usesScreenContext ? "Collecting screenshot..." : "Screen context is off"
 
         contextCaptureTask = Task { [weak self] in
             guard let self else { return nil }
-            let context = await self.contextService.collectContext()
+            let context = usesScreenContext
+                ? await self.contextService.collectContext()
+                : self.contextService.collectLocalContext()
+            let isCancelled = Task.isCancelled
             await MainActor.run {
+                // A capture that outlived its dictation must not leak into the next one.
+                guard generation == self.contextCaptureGeneration, !isCancelled else { return }
                 self.capturedContext = context
                 self.lastContextSummary = context.contextSummary
                 self.lastContextScreenshotDataURL = context.screenshotDataURL
@@ -3224,10 +3236,32 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.lastContextSelectedText = context.selectedText ?? ""
                 self.lastContextLLMPrompt = context.contextPrompt ?? ""
                 self.lastPostProcessingStatus = "App context captured"
-                self.handleScreenshotCaptureIssue(context.screenshotError)
+                if usesScreenContext {
+                    self.handleScreenshotCaptureIssue(context.screenshotError)
+                }
             }
             return context
         }
+    }
+
+    /// Once the transcript is ready, waits at most `ContextWaitRace.defaultDeadline`
+    /// for an unfinished capture, then cancels it and uses the cheap local fallback.
+    private func resolveSessionContext(
+        _ sessionContext: AppContext?,
+        inFlight: Task<AppContext?, Never>?
+    ) async -> AppContext {
+        if let sessionContext { return sessionContext }
+        if let inFlight {
+            if let context = await ContextWaitRace.value(
+                of: { await inFlight.value },
+                deadline: ContextWaitRace.defaultDeadline
+            ) {
+                return context
+            }
+            inFlight.cancel()
+            os_log(.info, log: recordingLog, "context not ready within deadline; using local fallback")
+        }
+        return fallbackContextAtStop()
     }
 
     private func fallbackContextAtStop() -> AppContext {

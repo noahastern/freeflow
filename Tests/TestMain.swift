@@ -16,6 +16,7 @@ struct FreeFlowTests {
         RecordingTimerPreferenceTests.run()
         MicrophoneReadinessPreferenceTests.run()
         OriginalFieldInsertionPreferenceTests.run()
+        await ScreenContextPreferenceTests.run()
         ShortcutCoreTests.run()
         SemanticVersionTests.run()
         LLMCooldownManagerTests.run()

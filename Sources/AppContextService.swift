@@ -122,6 +122,40 @@ Return only two sentences, no labels, no markdown, no extra commentary.
         )
     }
 
+    /// Local metadata only, for when screen context is off: no screenshot, no
+    /// Screen Recording check, and no provider call. Per-app styles still get
+    /// the bundle ID and window title they match on.
+    func collectLocalContext() -> AppContext {
+        guard let frontmostApp = NSWorkspace.shared.frontmostApplication else {
+            return AppContext(
+                appName: nil,
+                bundleIdentifier: nil,
+                windowTitle: nil,
+                selectedText: nil,
+                currentActivity: ContextInferenceFailure.screenContextDisabledSummary,
+                contextSystemPrompt: nil,
+                contextPrompt: nil,
+                screenshotDataURL: nil,
+                screenshotMimeType: nil,
+                screenshotError: "Screen context is off"
+            )
+        }
+        let appName = frontmostApp.localizedName
+        let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
+        return AppContext(
+            appName: appName,
+            bundleIdentifier: frontmostApp.bundleIdentifier,
+            windowTitle: focusedWindowTitle(from: appElement) ?? appName,
+            selectedText: nil,
+            currentActivity: ContextInferenceFailure.screenContextDisabledSummary,
+            contextSystemPrompt: nil,
+            contextPrompt: nil,
+            screenshotDataURL: nil,
+            screenshotMimeType: nil,
+            screenshotError: "Screen context is off"
+        )
+    }
+
     func collectContext() async -> AppContext {
         let contextSystemPrompt = resolveContextPrompt()
 
