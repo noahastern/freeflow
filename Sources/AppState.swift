@@ -681,6 +681,47 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var automaticTerminationDisabled = false
     private var activeAudioInterruption: ActiveAudioInterruption?
     private var pendingOverlayDismissToken: UUID?
+
+    /// The transcription run started by `stopAndTranscribe`, kept so Escape
+    /// with Undo can take over its audio and in-flight request.
+    private struct ActiveTranscriptionRun {
+        let token: UUID
+        let intent: SessionIntent
+        let sessionContext: AppContext?
+        let inFlightContextTask: Task<AppContext?, Never>?
+        var savedAudioFile: SavedAudioFile?
+        var rawTranscriptTask: Task<String, Error>?
+    }
+
+    /// A dictation cancelled with Escape while its Undo toast is up. The
+    /// audio lives in the app's private audio directory, like every run's
+    /// audio, and is deleted if the toast expires.
+    private struct CancelledDictation {
+        let audioFile: SavedAudioFile
+        let sessionContext: AppContext?
+        let inFlightContextTask: Task<AppContext?, Never>?
+        let rawTranscriptTask: Task<String, Error>?
+    }
+
+    /// Escape was pressed before the recorder handed over the audio file.
+    private struct EscapeUndoHandoff {
+        let token: UUID
+        let sessionContext: AppContext?
+        let inFlightContextTask: Task<AppContext?, Never>?
+    }
+
+    private var activeTranscriptionRun: ActiveTranscriptionRun?
+    private var pendingEscapeUndoHandoff: EscapeUndoHandoff?
+    private let escapeUndoController = EscapeUndoController<CancelledDictation>(
+        scheduler: MainQueueEscapeUndoTimerScheduler()
+    )
+    private var escapeUndoToastToken: UUID?
+    /// When the microphone delivered its first audio for the current recording.
+    private var activeCaptureStartedAt: ContinuousClock.Instant?
+    /// Counts recordings so a background Undo can tell whether another
+    /// dictation's paste and clipboard restore may still be settling.
+    private var dictationStartCount = 0
+    private let escapeUndoCopiedToastDuration: TimeInterval = 2
     private var shouldMonitorHotkeys = false
     private var isCapturingShortcut = false
     private var isAwaitingMicrophonePermission = false
@@ -895,6 +936,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
             DispatchQueue.main.async {
                 self?.handleUpdateOverlayPressed()
             }
+        }
+        overlayManager.onNoticeActionPressed = { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleEscapeUndoPressed()
+            }
+        }
+        escapeUndoController.onEffect = { [weak self] effect in
+            self?.handleEscapeUndoEffect(effect)
         }
 
         // Clear any stale recording flag left over from an unclean exit.
@@ -1982,21 +2031,403 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func handleEscapeKeyPress() -> Bool {
         // Returning false lets Escape pass through to the focused app.
-        guard EscapeKeyPreference.load(from: .standard) == .discard else {
+        let behavior = EscapeKeyPreference.load(from: .standard)
+        guard behavior.interceptsEscape else {
             return false
         }
 
         if isTranscribing {
-            cancelTranscription()
+            if behavior == .cancelWithUndo {
+                cancelTranscriptionKeepingForUndo()
+            } else {
+                cancelTranscription()
+            }
             return true
         }
 
+        // Hold-to-talk recordings are not stopped by Escape under any
+        // behavior: the user is still holding the shortcut, and releasing it
+        // is the stop. Escape reaches the active app as before.
         if pendingShortcutStartMode == .toggle || activeRecordingTriggerMode == .toggle {
-            cancelToggleShortcutSession()
+            if behavior == .cancelWithUndo {
+                cancelToggleRecordingKeepingForUndo()
+            } else {
+                cancelToggleShortcutSession()
+            }
             return true
         }
 
         return false
+    }
+
+    // MARK: Escape, then Undo
+
+    private static func seconds(_ duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1e18
+    }
+
+    /// Escape during a tap-to-toggle recording: stop capture and hide the
+    /// recording UI like a cancel, but keep the audio for a short Undo.
+    /// Nothing is uploaded unless the user presses Undo.
+    private func cancelToggleRecordingKeepingForUndo() {
+        let capturedDuration = activeCaptureStartedAt.map { Self.seconds($0.duration(to: .now)) }
+        guard isRecording, activeRecordingTriggerMode == .toggle,
+              EscapeUndoPolicy.shouldOfferUndo(
+                capturedDuration: capturedDuration,
+                isCommandMode: currentSessionIntent.isCommandMode
+              ) else {
+            cancelToggleShortcutSession()
+            return
+        }
+
+        let handoff = EscapeUndoHandoff(
+            token: UUID(),
+            sessionContext: capturedContext,
+            inFlightContextTask: contextCaptureTask
+        )
+        textInsertionTargetID = nil
+        cancelPendingShortcutStart()
+        shortcutSessionController.reset()
+        activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
+        activeOriginalFieldInsertionEnabled = false
+        audioRecorder.onRecordingReady = nil
+        audioRecorder.onRecordingFailure = nil
+        audioLevelCancellable?.cancel()
+        audioLevelCancellable = nil
+        // The context task keeps running so Undo can use it; it is cancelled
+        // with the rest of the item if the toast expires.
+        contextCaptureTask = nil
+        capturedContext = nil
+        currentSessionIntent = .dictation
+        activeCaptureStartedAt = nil
+        isRecording = false
+        errorMessage = nil
+        debugStatusMessage = "Cancelled"
+        statusText = "Cancelled"
+        tearDownRealtimeService()
+        restoreAudioInterruptionIfNeeded()
+        endCriticalDictationActivity()
+        refreshAvailableMicrophonesIfNeeded()
+        showEscapeUndoToast()
+
+        pendingEscapeUndoHandoff = handoff
+        audioRecorder.stopRecording { [weak self] fileURL in
+            guard let self else { return }
+            if !self.completeEscapeUndoHandoff(token: handoff.token, fileURL: fileURL) {
+                self.dismissEscapeUndoToastIfShowing()
+            }
+            // Remove only this recording's temporary file: a new recording may
+            // already own the recorder's current temp file.
+            if let fileURL {
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+        }
+        scheduleReadyStatusReset(after: 2, matching: ["Cancelled"])
+    }
+
+    /// Escape while transcribing: hide the transcribing UI and skip the
+    /// paste, but keep the audio and let an already-sent transcription
+    /// request finish in memory so Undo does not upload again.
+    private func cancelTranscriptionKeepingForUndo() {
+        guard isTranscribing else { return }
+        guard let run = activeTranscriptionRun, !run.intent.isCommandMode,
+              run.rawTranscriptTask == nil || run.savedAudioFile != nil else {
+            // Edit/command sessions transform selected text, and a run whose
+            // audio could not be saved cannot be retried; Escape discards both.
+            cancelTranscription()
+            return
+        }
+
+        activeTranscriptionRun = nil
+        // Cancel only the pipeline that would paste; the raw transcription
+        // request is a separate task and keeps running.
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        transcribingAudioFileName = nil
+        textInsertionTargetID = nil
+        shortcutSessionController.reset()
+        activeRecordingTriggerMode = nil
+        activeTextInsertionTarget = nil
+        currentSessionIntent = .dictation
+        isRecording = false
+        isTranscribing = false
+        errorMessage = nil
+        debugStatusMessage = "Cancelled"
+        statusText = "Cancelled"
+        endCriticalDictationActivity()
+        refreshAvailableMicrophonesIfNeeded()
+        scheduleReadyStatusReset(after: 2, matching: ["Cancelled"])
+
+        guard let savedAudioFile = run.savedAudioFile, let rawTranscriptTask = run.rawTranscriptTask else {
+            // The recorder has not handed over the audio yet; the stop
+            // callback in `stopAndTranscribe` finishes the handoff.
+            showEscapeUndoToast()
+            pendingEscapeUndoHandoff = EscapeUndoHandoff(
+                token: run.token,
+                sessionContext: run.sessionContext,
+                inFlightContextTask: run.inFlightContextTask
+            )
+            return
+        }
+
+        audioRecorder.cleanup()
+        let id = escapeUndoController.begin(
+            payload: CancelledDictation(
+                audioFile: savedAudioFile,
+                sessionContext: run.sessionContext,
+                inFlightContextTask: run.inFlightContextTask,
+                rawTranscriptTask: rawTranscriptTask
+            ),
+            transcript: .inFlight
+        )
+        showEscapeUndoToast()
+        Task { [weak self] in
+            let result: Result<String, Error>
+            do {
+                result = .success(try await rawTranscriptTask.value)
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let rawTranscript):
+                    self.escapeUndoController.transcriptionFinished(id: id, rawTranscript: rawTranscript)
+                case .failure:
+                    self.escapeUndoController.transcriptionFailed(id: id)
+                }
+            }
+        }
+    }
+
+    /// Adopts the audio of a recording stopped by Escape. Returns false when
+    /// the handoff was superseded or the audio could not be kept.
+    @discardableResult
+    private func completeEscapeUndoHandoff(token: UUID, fileURL: URL?) -> Bool {
+        guard let handoff = pendingEscapeUndoHandoff, handoff.token == token else { return false }
+        pendingEscapeUndoHandoff = nil
+        guard let fileURL, let savedAudioFile = Self.saveAudioFile(from: fileURL) else {
+            handoff.inFlightContextTask?.cancel()
+            return false
+        }
+        escapeUndoController.begin(
+            payload: CancelledDictation(
+                audioFile: savedAudioFile,
+                sessionContext: handoff.sessionContext,
+                inFlightContextTask: handoff.inFlightContextTask,
+                rawTranscriptTask: nil
+            ),
+            transcript: .notRequested
+        )
+        return true
+    }
+
+    /// Drops any cancelled dictation still waiting for Undo, e.g. because a
+    /// new recording is starting or the app is quitting.
+    func discardPendingEscapeUndo() {
+        if let handoff = pendingEscapeUndoHandoff {
+            handoff.inFlightContextTask?.cancel()
+            pendingEscapeUndoHandoff = nil
+        }
+        escapeUndoController.supersede()
+        escapeUndoToastToken = nil
+    }
+
+    private func showEscapeUndoToast() {
+        let token = UUID()
+        pendingOverlayDismissToken = token
+        escapeUndoToastToken = token
+        // Replaces the recording pill in place, so the UI reads as cancelled.
+        overlayManager.showNotice(
+            message: "Dictation cancelled",
+            systemImage: "xmark.circle.fill",
+            actionTitle: "Undo"
+        )
+    }
+
+    private func dismissEscapeUndoToastIfShowing() {
+        guard let token = escapeUndoToastToken else { return }
+        escapeUndoToastToken = nil
+        guard pendingOverlayDismissToken == token else { return }
+        pendingOverlayDismissToken = nil
+        overlayManager.dismiss()
+    }
+
+    private func handleEscapeUndoPressed() {
+        dismissEscapeUndoToastIfShowing()
+        escapeUndoController.undo()
+    }
+
+    private func handleEscapeUndoEffect(_ effect: EscapeUndoEffect<CancelledDictation>) {
+        switch effect {
+        case .discard(let item, let reason):
+            item.rawTranscriptTask?.cancel()
+            item.inFlightContextTask?.cancel()
+            Self.deleteAudioFile(item.audioFile.fileName)
+            if reason == .expired {
+                dismissEscapeUndoToastIfShowing()
+            }
+        case .process(let item, let rawTranscript):
+            runEscapeUndoPipeline(item, rawTranscript: rawTranscript)
+        case .awaitInFlightTranscription(let item):
+            runEscapeUndoPipeline(item, rawTranscript: nil)
+        case .transcribe(let item):
+            runEscapeUndoPipeline(
+                CancelledDictation(
+                    audioFile: item.audioFile,
+                    sessionContext: item.sessionContext,
+                    inFlightContextTask: item.inFlightContextTask,
+                    rawTranscriptTask: nil
+                ),
+                rawTranscript: nil
+            )
+        }
+    }
+
+    /// Runs transcription (unless already done) and cleanup in the
+    /// background, records history, and copies the result instead of pasting.
+    private func runEscapeUndoPipeline(_ item: CancelledDictation, rawTranscript knownRawTranscript: String?) {
+        let startCountAtUndo = dictationStartCount
+        let postProcessingService = PostProcessingService(
+            apiKey: apiKey,
+            baseURL: apiBaseURL,
+            preferredModel: postProcessingModel,
+            preferredFallbackModel: postProcessingFallbackModel,
+            instructionExecutionGuardEnabled: instructionExecutionGuardEnabled
+        )
+        let systemPrompt = Self.resolvedSystemPrompt(customSystemPrompt)
+
+        Task {
+            do {
+                let rawTranscript: String
+                if let knownRawTranscript {
+                    rawTranscript = knownRawTranscript
+                } else if let rawTranscriptTask = item.rawTranscriptTask {
+                    rawTranscript = try await rawTranscriptTask.value
+                } else {
+                    rawTranscript = try await Self.resolveRawTranscript(
+                        realtimeService: nil,
+                        fileService: try self.makeTranscriptionService(),
+                        mainProviderFallback: self.makeMainProviderTranscriptionFallback(),
+                        fileURL: item.audioFile.fileURL
+                    )
+                }
+                // A spoken "press enter" is ignored: Undo copies, it never types.
+                let parsedTranscript = Self.parseTranscriptCommands(
+                    from: rawTranscript,
+                    pressEnterCommandEnabled: self.isPressEnterVoiceCommandEnabled
+                )
+                let appContext: AppContext
+                if let sessionContext = item.sessionContext {
+                    appContext = sessionContext
+                } else if let inFlightContext = await item.inFlightContextTask?.value {
+                    appContext = inFlightContext
+                } else {
+                    appContext = self.fallbackContextAtStop()
+                }
+                let result = await self.processTranscript(
+                    parsedTranscript.transcript,
+                    intent: .dictation,
+                    context: appContext,
+                    postProcessingService: postProcessingService,
+                    customVocabulary: self.customVocabulary,
+                    customSystemPrompt: self.customSystemPrompt,
+                    appStyleSettings: self.appStyleSettings,
+                    formattingPreferences: self.formattingPreferences,
+                    outputLanguage: self.outputLanguage,
+                    dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
+                    cleanupLevel: self.cleanupLevel
+                )
+                await MainActor.run {
+                    let finalTranscript = result.finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.recordPipelineHistoryEntry(
+                        rawTranscript: parsedTranscript.transcript,
+                        postProcessedTranscript: finalTranscript,
+                        postProcessingPrompt: result.prompt,
+                        systemPrompt: systemPrompt,
+                        context: appContext,
+                        processingStatus: Self.statusMessage(for: result.outcome, parsedTranscript: parsedTranscript),
+                        intent: .dictation,
+                        audioFileName: item.audioFile.fileName,
+                        debugStatus: "Copied after Undo"
+                    )
+                    guard !finalTranscript.isEmpty else {
+                        self.showEscapeUndoResultNotice("Nothing to transcribe", systemImage: "waveform")
+                        return
+                    }
+                    self.lastTranscript = finalTranscript
+                    self.performWhenDictationSettled(since: startCountAtUndo) {
+                        self.writeTextToPasteboard(finalTranscript)
+                        self.showEscapeUndoResultNotice("Copied to clipboard", systemImage: "doc.on.clipboard")
+                    }
+                }
+            } catch {
+                let fallbackContext = item.sessionContext ?? self.fallbackContextAtStop()
+                await MainActor.run {
+                    // The audio stays on disk and the history entry points to
+                    // it, so the run can be retried from history.
+                    self.recordPipelineHistoryEntry(
+                        rawTranscript: "",
+                        postProcessedTranscript: "",
+                        postProcessingPrompt: "",
+                        systemPrompt: systemPrompt,
+                        context: fallbackContext,
+                        processingStatus: "Error: \(error.localizedDescription)",
+                        intent: .dictation,
+                        audioFileName: item.audioFile.fileName,
+                        debugStatus: "Undo failed"
+                    )
+                    let message = "Undo failed: \(self.formattedTranscriptionError(error))"
+                    if self.isOverlayFreeForEscapeUndoNotice {
+                        self.clearPendingOverlayDismissToken()
+                        self.overlayManager.showError(message)
+                    } else {
+                        self.errorMessage = message
+                    }
+                }
+            }
+        }
+    }
+
+    /// True when no recording, transcription, or newer Undo toast owns the overlay.
+    private var isOverlayFreeForEscapeUndoNotice: Bool {
+        !isRecording && !isTranscribing && pendingShortcutStartMode == nil && !escapeUndoController.hasPending
+            && pendingEscapeUndoHandoff == nil
+    }
+
+    private func showEscapeUndoResultNotice(_ message: String, systemImage: String) {
+        guard isOverlayFreeForEscapeUndoNotice else { return }
+        let token = UUID()
+        pendingOverlayDismissToken = token
+        overlayManager.showNotice(message: message, systemImage: systemImage)
+        DispatchQueue.main.asyncAfter(deadline: .now() + escapeUndoCopiedToastDuration) { [weak self] in
+            guard let self, self.pendingOverlayDismissToken == token else { return }
+            self.pendingOverlayDismissToken = nil
+            self.overlayManager.dismiss()
+        }
+    }
+
+    /// Runs `action` once no dictation is in progress. If another dictation
+    /// ran since `startCount`, also waits for its paste and clipboard restore
+    /// so neither write clobbers the other.
+    private func performWhenDictationSettled(since startCount: Int, _ action: @escaping () -> Void) {
+        if isRecording || isTranscribing || pendingShortcutStartMode != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.performWhenDictationSettled(since: startCount, action)
+            }
+            return
+        }
+        if dictationStartCount != startCount {
+            let observedCount = dictationStartCount
+            let settleDelay = clipboardRestoreDelay + pressEnterAfterPasteDelay + 0.5
+            DispatchQueue.main.asyncAfter(deadline: .now() + settleDelay) { [weak self] in
+                self?.performWhenDictationSettled(since: observedCount, action)
+            }
+            return
+        }
+        action()
     }
 
     /// Copies the last transcript to the pasteboard and pastes it into the
@@ -2069,6 +2500,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         textInsertionTargetID = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        activeTranscriptionRun?.rawTranscriptTask?.cancel()
+        activeTranscriptionRun = nil
         contextCaptureTask?.cancel()
         contextCaptureTask = nil
         capturedContext = nil
@@ -2436,6 +2869,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func beginRecording(triggerMode: RecordingTriggerMode) {
         os_log(.info, log: recordingLog, "beginRecording() entered")
         beginCriticalDictationActivity()
+        // A new dictation supersedes any cancelled one still offering Undo;
+        // its recording pill replaces the toast.
+        discardPendingEscapeUndo()
+        dictationStartCount += 1
+        activeCaptureStartedAt = nil
         clearPendingOverlayDismissToken()
         errorMessage = nil
 
@@ -2465,6 +2903,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             // Do not enqueue again: cancellation could invalidate it between main-queue blocks.
             guard let self, self.isRecording, self.activeRecordingTriggerMode != nil else { return }
             os_log(.info, log: recordingLog, "first real audio — waveform live")
+            self.activeCaptureStartedAt = captureStartedAt
             self.statusText = "Recording..."
             self.clearPendingOverlayDismissToken()
             self.overlayManager.markAudioReady(startedAt: captureStartedAt)
@@ -2856,6 +3295,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
         debugStatusMessage = "Preparing audio"
         let sessionContext = capturedContext
         let inFlightContextTask = contextCaptureTask
+        let runToken = UUID()
+        activeTranscriptionRun = ActiveTranscriptionRun(
+            token: runToken,
+            intent: sessionIntent,
+            sessionContext: sessionContext,
+            inFlightContextTask: inFlightContextTask
+        )
         capturedContext = nil
         contextCaptureTask = nil
         lastRawTranscript = ""
@@ -2874,7 +3320,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
         overlayManager.showTranscribing()
         audioRecorder.stopRecording { [weak self] fileURL in
             guard let self else { return }
+            if self.pendingEscapeUndoHandoff?.token == runToken {
+                // Escape with Undo was pressed while the audio was being
+                // finalized; keep it for Undo instead of transcribing now.
+                self.tearDownRealtimeService()
+                if !self.completeEscapeUndoHandoff(token: runToken, fileURL: fileURL) {
+                    self.dismissEscapeUndoToastIfShowing()
+                }
+                self.audioRecorder.cleanup()
+                self.refreshAvailableMicrophonesIfNeeded()
+                return
+            }
             guard let fileURL else {
+                self.clearActiveTranscriptionRun(ifMatching: runToken)
                 self.isTranscribing = false
                 self.audioRecorder.cleanup()
                 self.endCriticalDictationActivity()
@@ -2910,7 +3368,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.realtimeService = nil
             self.audioRecorder.onPCM16Samples = nil
             self.transcriptionTask?.cancel()
-            guard self.isTranscribing else {
+            guard self.isTranscribing, self.activeTranscriptionRun?.token == runToken else {
                 if let savedAudioFile {
                     Self.deleteAudioFile(savedAudioFile.fileName)
                 }
@@ -2921,19 +3379,30 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.refreshAvailableMicrophonesIfNeeded()
                 return
             }
-            self.transcriptionTask = Task {
+            // The raw transcription is its own task so Escape with Undo can
+            // cancel the paste pipeline while keeping an already-sent request.
+            let rawTranscriptTask = Task<String, Error> {
                 defer {
                     activeRealtime?.cancel()
                 }
+                let transcriptionService = try self.makeTranscriptionService()
+                return try await Self.resolveRawTranscript(
+                    realtimeService: activeRealtime,
+                    fileService: transcriptionService,
+                    mainProviderFallback: self.makeMainProviderTranscriptionFallback(),
+                    fileURL: transcriptionFileURL
+                )
+            }
+            if self.activeTranscriptionRun?.token == runToken {
+                self.activeTranscriptionRun?.savedAudioFile = savedAudioFile
+                self.activeTranscriptionRun?.rawTranscriptTask = rawTranscriptTask
+            }
+            self.transcriptionTask = Task {
                 do {
-                    let transcriptionService = try self.makeTranscriptionService()
-                    async let transcript = Self.resolveRawTranscript(
-                        realtimeService: activeRealtime,
-                        fileService: transcriptionService,
-                        mainProviderFallback: self.makeMainProviderTranscriptionFallback(),
-                        fileURL: transcriptionFileURL
-                    )
-                    let rawTranscript = try await transcript
+                    // Cancelling this task does not cancel `rawTranscriptTask`:
+                    // plain cancellation cancels it explicitly, and Escape with
+                    // Undo deliberately leaves it running.
+                    let rawTranscript = try await rawTranscriptTask.value
                     let parsedTranscript = Self.parseTranscriptCommands(
                         from: rawTranscript,
                         pressEnterCommandEnabled: self.isPressEnterVoiceCommandEnabled
@@ -2977,7 +3446,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     try Task.checkCancellation()
 
                     await MainActor.run {
-                        guard self.isTranscribing else { return }
+                        guard self.isTranscribing, self.activeTranscriptionRun?.token == runToken else { return }
+                        self.activeTranscriptionRun = nil
                         self.lastContextSummary = appContext.contextSummary
                         self.lastContextScreenshotDataURL = appContext.screenshotDataURL
                         self.lastContextScreenshotStatus = appContext.screenshotError
@@ -3070,6 +3540,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     }
                 } catch is CancellationError {
                     await MainActor.run {
+                        // Cancellation paths reset their own state; only clean
+                        // up if this run is somehow still the current one.
+                        guard self.activeTranscriptionRun?.token == runToken else { return }
+                        self.activeTranscriptionRun = nil
                         self.transcriptionTask = nil
                         self.endCriticalDictationActivity()
                     }
@@ -3083,7 +3557,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         resolvedContext = self.fallbackContextAtStop()
                     }
                     await MainActor.run {
-                        guard self.isTranscribing else { return }
+                        guard self.isTranscribing, self.activeTranscriptionRun?.token == runToken else { return }
+                        self.activeTranscriptionRun = nil
                         self.transcriptionTask = nil
                         self.transcribingAudioFileName = nil
                         let userFacingErrorMessage = self.formattedTranscriptionError(error)
@@ -3124,6 +3599,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
             : customSystemPrompt
     }
 
+    private func clearActiveTranscriptionRun(ifMatching token: UUID) {
+        if activeTranscriptionRun?.token == token {
+            activeTranscriptionRun = nil
+        }
+    }
+
     private func recordPipelineHistoryEntry(
         rawTranscript: String,
         postProcessedTranscript: String,
@@ -3132,7 +3613,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         context: AppContext,
         processingStatus: String,
         intent: SessionIntent,
-        audioFileName: String? = nil
+        audioFileName: String? = nil,
+        debugStatus: String? = nil
     ) {
         let newEntry = PipelineHistoryItem(
             intent: intent.persistedIntent,
@@ -3150,7 +3632,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             contextScreenshotStatus: context.screenshotError
                 ?? "available (\(context.screenshotMimeType ?? "image"))",
             postProcessingStatus: processingStatus,
-            debugStatus: debugStatusMessage,
+            debugStatus: debugStatus ?? debugStatusMessage,
             customVocabulary: customVocabulary,
             audioFileName: audioFileName,
             contextAppName: context.appName,
@@ -3780,7 +4262,20 @@ final class AppState: ObservableObject, @unchecked Sendable {
         // Append a space when ending with sentence-ending punctuation so the
         // next dictation does not jam against the prior period.
         let textToWrite = transcriptTextForInsertion(transcript)
+        writeTextToPasteboard(textToWrite)
 
+        guard let snapshot else { return nil }
+        return PendingClipboardRestore(
+            snapshot: snapshot,
+            expectedChangeCount: pasteboard.changeCount,
+            writtenTranscript: textToWrite
+        )
+    }
+
+    /// Writes dictated text to the general pasteboard, marking it transient
+    /// unless the user keeps dictations in clipboard history.
+    private func writeTextToPasteboard(_ textToWrite: String) {
+        let pasteboard = NSPasteboard.general
         if keepDictationInClipboardHistory {
             // Plain write so clipboard managers record the dictation in history.
             pasteboard.clearContents()
@@ -3814,13 +4309,6 @@ final class AppState: ObservableObject, @unchecked Sendable {
             pasteboard.setString("", forType: autoGeneratedType)
             pasteboard.setString("", forType: legacyTransientType)
         }
-
-        guard let snapshot else { return nil }
-        return PendingClipboardRestore(
-            snapshot: snapshot,
-            expectedChangeCount: pasteboard.changeCount,
-            writtenTranscript: textToWrite
-        )
     }
 
     private func restoreClipboardIfNeeded(_ pendingRestore: PendingClipboardRestore?) {

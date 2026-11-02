@@ -1133,12 +1133,21 @@ struct GeneralSettingsView: View {
                 }
                 .pickerStyle(.segmented)
 
-                Text(escapeKeyBehavior == .discard
-                    ? "Escape stops a tap-to-toggle recording or an in-progress transcription and throws it away."
-                    : "Escape passes through to the active app, so closing a popup never loses your recording. Use the overlay's X to discard instead.")
+                Text(escapeKeyDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var escapeKeyDescription: String {
+        switch escapeKeyBehavior {
+        case .cancelWithUndo:
+            return "Escape stops a tap-to-toggle recording or an in-progress transcription without pasting. For 5 seconds, click Undo in the overlay to finish it in the background and copy the text to the clipboard. Edit-mode sessions and very short recordings are discarded without Undo."
+        case .discard:
+            return "Escape stops a tap-to-toggle recording or an in-progress transcription and throws it away."
+        case .ignore:
+            return "Escape passes through to the active app, so closing a popup never loses your recording. Use the overlay's X to discard instead."
         }
     }
 
