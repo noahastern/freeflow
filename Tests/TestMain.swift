@@ -30,6 +30,7 @@ struct FreeFlowTests {
         VocabularyPromptTests.run()
         VocabularyCorrectionCoreTests.run()
         CorrectionRegionCoreTests.run()
+        CorrectionWatchProgressTests.run()
         LearnedCorrectionTests.run()
         print("FreeFlowTests passed")
     }

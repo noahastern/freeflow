@@ -201,3 +201,60 @@ enum CorrectionRegionCore {
         return positions
     }
 }
+
+/// When to learn during a watch. Pure: it sees region fingerprints and diff outcomes,
+/// never field text. A fix is learned once the edited region has stayed the same for
+/// `stablePollsToLearn` polls, so half-typed words are not learned.
+struct CorrectionWatchProgress {
+    struct Pair: Equatable {
+        let heard: String
+        let meant: String
+    }
+
+    enum Decision: Equatable {
+        case keepWatching
+        case learn(Pair)
+    }
+
+    static let stablePollsToLearn = 2
+    static let stablePollsToLearnOnEarlyStop = 1
+
+    let insertedFingerprint: CorrectionAnchors.Fingerprint
+    private(set) var lastFingerprint: CorrectionAnchors.Fingerprint
+    private(set) var stablePolls = 0
+    private(set) var pending: Pair?
+
+    init(insertedFingerprint: CorrectionAnchors.Fingerprint) {
+        self.insertedFingerprint = insertedFingerprint
+        self.lastFingerprint = insertedFingerprint
+    }
+
+    /// Records one poll. `evaluate` runs only when the region changed.
+    mutating func observe(
+        regionFingerprint: CorrectionAnchors.Fingerprint,
+        evaluate: () -> VocabularyCorrectionCore.Outcome
+    ) -> Decision {
+        if regionFingerprint == lastFingerprint {
+            stablePolls += 1
+        } else {
+            lastFingerprint = regionFingerprint
+            stablePolls = 0
+            if regionFingerprint == insertedFingerprint {
+                pending = nil
+            } else if case .candidate(let heard, let meant) = evaluate() {
+                pending = Pair(heard: heard, meant: meant)
+            } else {
+                pending = nil
+            }
+        }
+        if let pending, stablePolls >= Self.stablePollsToLearn { return .learn(pending) }
+        return .keepWatching
+    }
+
+    /// The fix to keep when the watch ends early. Timeouts keep whatever was last seen;
+    /// other stops need the fix to have been stable for at least one poll.
+    func pairOnStop(isTimeout: Bool) -> Pair? {
+        guard let pending else { return nil }
+        return isTimeout || stablePolls >= Self.stablePollsToLearnOnEarlyStop ? pending : nil
+    }
+}
