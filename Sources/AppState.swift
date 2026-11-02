@@ -1381,7 +1381,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     formattingPreferences: self.formattingPreferences,
                     outputLanguage: self.outputLanguage,
                     dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
-                    cleanupLevel: self.cleanupLevel
+                    cleanupLevel: self.cleanupLevel,
+                    pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste
                 )
                 finalTranscript = result.finalTranscript
                 processingStatus = Self.statusMessage(
@@ -2685,6 +2686,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         case postProcessingSucceeded
         case postProcessingFailedFallback
         case preservedExactWording
+        case skippedCleanupAlreadyClean
         case preservedExactWordingTranslated
         case preservedExactWordingTranslationFailedFallback
         case commandModeSucceeded(invocation: CommandInvocation)
@@ -2704,6 +2706,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     : "Post-processing failed, using raw transcript"
             case .preservedExactWording:
                 return "Preserved exact wording, skipped post-processing"
+            case .skippedCleanupAlreadyClean:
+                return "Short transcript already clean, skipped post-processing"
             case .preservedExactWordingTranslated:
                 return "Preserved exact wording, translated to output language"
             case .preservedExactWordingTranslationFailedFallback:
@@ -2727,7 +2731,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         formattingPreferences: FormattingPreferences,
         outputLanguage: String = "",
         dictationLanguage: String = "",
-        cleanupLevel: CleanupLevel
+        cleanupLevel: CleanupLevel,
+        pressesEnterAfterPaste: Bool
     ) async -> (finalTranscript: String, outcome: TranscriptProcessingOutcome, prompt: String) {
         let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -2784,6 +2789,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
                        error.localizedDescription)
                 return (trimmedRawTranscript, .preservedExactWordingTranslationFailedFallback, "")
             }
+        }
+
+        let bypassSettings = CleanupBypass.Settings(
+            cleanupLevel: cleanupLevel,
+            outputLanguage: outputLanguage,
+            dictationLanguage: dictationLanguage,
+            isEditMode: intent.isCommandMode,
+            pressesEnterAfterPaste: pressesEnterAfterPaste,
+            customSystemPrompt: customSystemPrompt,
+            formattingPrompt: formattingPreferences.promptSection,
+            styleAllowsVerbatim: CleanupBypass.styleAllowsVerbatim(
+                bundleIdentifier: context.bundleIdentifier,
+                windowTitle: context.windowTitle,
+                settings: appStyleSettings
+            ),
+            vocabularyTerms: VocabularyList.terms(from: customVocabulary)
+        )
+        if CleanupBypass.canSkipCleanup(transcript: trimmedRawTranscript, settings: bypassSettings) {
+            return (trimmedRawTranscript, .skippedCleanupAlreadyClean, "")
         }
 
         do {
@@ -2982,7 +3006,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         formattingPreferences: self.formattingPreferences,
                         outputLanguage: self.outputLanguage,
                         dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
-                        cleanupLevel: self.cleanupLevel
+                        cleanupLevel: self.cleanupLevel,
+                        pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste
                     )
                     try Task.checkCancellation()
 

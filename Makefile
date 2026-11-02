@@ -20,6 +20,7 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/AppContextService.swift \
 	Sources/AppName.swift \
 	Sources/AppStyle.swift \
+	Sources/CleanupBypass.swift \
 	Sources/CleanupLevel.swift \
 	Sources/FormattingPreferences.swift \
 	Sources/AppTextInsertionCore.swift \

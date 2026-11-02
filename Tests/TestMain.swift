@@ -6,6 +6,7 @@ struct FreeFlowTests {
         AlertSoundPreferenceTests.run()
         AppStyleTests.run()
         CleanupLevelTests.run()
+        CleanupBypassTests.run()
         FormattingPreferencesTests.run()
         AppContextServiceTests.run()
         await LLMAPITransportTests.run()
