@@ -26,6 +26,9 @@ struct VocabularySettingsView: View {
                 SettingsCard("Edit as Text", icon: "text.alignleft") {
                     bulkEditSection
                 }
+                SettingsCard("Learned Corrections", icon: "wand.and.stars") {
+                    LearnedCorrectionsSection()
+                }
             }
             .padding(24)
         }
@@ -113,6 +116,89 @@ struct VocabularySettingsView: View {
         if VocabularyList.terms(from: appState.customVocabulary) != VocabularyList.terms(from: normalized) {
             appState.customVocabulary = normalized
         }
+    }
+}
+
+// MARK: - Learned Corrections
+
+private struct LearnedCorrectionsSection: View {
+    @EnvironmentObject var appState: AppState
+    @State private var confirmsClearAll = false
+
+    private var corrections: [LearnedCorrection] {
+        appState.learnedCorrections.active
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("Learn from my corrections", isOn: $appState.learnFromCorrectionsEnabled)
+
+            Text("When you fix a misheard word right after dictating, \(AppName.displayName) remembers the fix and applies it next time. It briefly reads only the field you dictated into, and it keeps just the two phrases on this Mac. Terminals, password managers, and password fields are skipped.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if corrections.isEmpty {
+                Text("Nothing learned yet. Fix a misheard word after dictating and it shows up here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(corrections) { correction in
+                        LearnedCorrectionRow(correction: correction) {
+                            appState.removeLearnedCorrection(id: correction.id)
+                        }
+                    }
+                }
+
+                HStack {
+                    Text("\(corrections.count) \(corrections.count == 1 ? "correction" : "corrections")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clear All…") { confirmsClearAll = true }
+                }
+            }
+        }
+        .confirmationDialog(
+            "Clear all learned corrections?",
+            isPresented: $confirmsClearAll
+        ) {
+            Button("Clear All", role: .destructive) { appState.clearLearnedCorrections() }
+        } message: {
+            Text("Corrections you removed or undid can be learned again afterward.")
+        }
+    }
+}
+
+private struct LearnedCorrectionRow: View {
+    let correction: LearnedCorrection
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(correction.heard)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(correction.meant)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove and don't learn this again")
+        }
+        .font(.callout)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.accentColor.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 }
 

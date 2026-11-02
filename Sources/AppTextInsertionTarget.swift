@@ -41,6 +41,45 @@ struct AppTextInsertionTarget {
         )
     }
 
+    /// Captures the focused element for the correction watcher without reading or keeping
+    /// its value. Secure fields and controls that fail `canCapture` are refused. The result
+    /// is for observation only and is never passed to `insert` or `pasteIfUnchanged`.
+    static func captureForObservation(from app: AXUIElement, processIdentifier: pid_t) -> Self? {
+        guard let element = accessibilityElement(from: app, attribute: kAXFocusedUIElementAttribute) else { return nil }
+        let role = attribute(from: element, name: kAXRoleAttribute) as? String
+        let subrole = attribute(from: element, name: kAXSubroleAttribute) as? String
+        guard subrole != kAXSecureTextFieldSubrole,
+              AppTextInsertionCore.canCapture(role: role, subrole: subrole) else { return nil }
+        return Self(
+            element: element,
+            window: nil,
+            valueAtCapture: nil,
+            selectedTextRange: nil,
+            processIdentifier: processIdentifier,
+            allowsTextCapture: true,
+            isSupportedTextControl: true,
+            isWebContent: isWebContent(of: element)
+        )
+    }
+
+    /// Reads the current value for one comparison; role and subrole are rechecked on every read.
+    /// Callers must not keep the returned text.
+    func readTextForObservation() -> String? {
+        Self.textValue(from: element)
+    }
+
+    /// Caret position in UTF-16 units when the selection is collapsed.
+    func readCaretForObservation() -> Int? {
+        guard Self.canReadText(from: element),
+              let range = Self.selection(from: element), range.length == 0 else { return nil }
+        return range.location
+    }
+
+    /// Bounds each Accessibility call on the observed element so a hung app cannot stall polling.
+    func limitMessagingTimeout(seconds: Float) {
+        AXUIElementSetMessagingTimeout(element, seconds)
+    }
+
     /// Requires the original AX element in the frontmost app, excluding known secure fields.
     var isFocused: Bool {
         NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier && isFocusedInApplication

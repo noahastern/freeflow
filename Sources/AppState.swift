@@ -419,6 +419,24 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
+    @Published var learnFromCorrectionsEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(learnFromCorrectionsEnabled, forKey: LearnFromCorrectionsPreference.storageKey)
+            if !learnFromCorrectionsEnabled {
+                correctionWatcher.stop(.disabled)
+            }
+        }
+    }
+
+    /// Learned heard -> meant pairs. Local only; never part of history or exports.
+    @Published var learnedCorrections: LearnedCorrectionList {
+        didSet {
+            if learnedCorrections != oldValue {
+                learnedCorrections.save(to: .standard)
+            }
+        }
+    }
+
     @Published var appStyleSettings: AppStyleSettings {
         didSet {
             appStyleSettings.save(to: .standard)
@@ -659,6 +677,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     let audioRecorder = AudioRecorder()
     let hotkeyManager = HotkeyManager()
     let overlayManager = RecordingOverlayManager()
+    private let correctionWatcher = CorrectionWatcher()
+    private let correctionLearnedToast = CorrectionLearnedToast()
     private var accessibilityTimer: Timer?
     private var audioLevelCancellable: AnyCancellable?
     private var debugOverlayTimer: Timer?
@@ -879,6 +899,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.commandModeStyle = commandModeStyle
         self.commandModeManualModifier = commandModeManualModifier
         self.customVocabulary = customVocabulary
+        self.learnFromCorrectionsEnabled = LearnFromCorrectionsPreference.load(from: .standard)
+        self.learnedCorrections = LearnedCorrectionList.load(from: .standard)
         self.appStyleSettings = AppStyleSettings.load(from: .standard)
         self.transcriptionLanguage = transcriptionLanguage
         self.customSystemPrompt = customSystemPrompt
@@ -957,6 +979,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         escapeUndoController.onEffect = { [weak self] effect in
             self?.handleEscapeUndoEffect(effect)
+        }
+        correctionWatcher.isEnabled = { [weak self] in self?.learnFromCorrectionsEnabled ?? false }
+        correctionWatcher.knownPairs = { [weak self] in self?.learnedCorrections.knownPairs ?? .init() }
+        correctionWatcher.onCorrection = { [weak self] heard, meant in
+            self?.learnCorrection(heard: heard, meant: meant)
         }
 
         // Clear any stale recording flag left over from an unclean exit.
@@ -1433,7 +1460,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     outputLanguage: self.outputLanguage,
                     dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                     cleanupLevel: self.cleanupLevel,
-                    pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste
+                    pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste,
+                    learnedCorrections: self.learnedCorrections.active
                 )
                 finalTranscript = result.finalTranscript
                 processingStatus = Self.statusMessage(
@@ -2127,15 +2155,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
         showEscapeUndoToast()
 
         pendingEscapeUndoHandoff = handoff
-        audioRecorder.stopRecording { [weak self] fileURL in
+        audioRecorder.stopRecording { [weak self] fileURL, compressedFileURL in
             guard let self else { return }
             if !self.completeEscapeUndoHandoff(token: handoff.token, fileURL: fileURL) {
                 self.dismissEscapeUndoToastIfShowing()
             }
-            // Remove only this recording's temporary file: a new recording may
-            // already own the recorder's current temp file.
-            if let fileURL {
-                try? FileManager.default.removeItem(at: fileURL)
+            // Remove only this recording's temporary files: a new recording may
+            // already own the recorder's current temp files. Undo uploads the
+            // saved WAV, so the FLAC copy is not needed.
+            for url in [fileURL, compressedFileURL].compactMap({ $0 }) {
+                try? FileManager.default.removeItem(at: url)
             }
         }
         scheduleReadyStatusReset(after: 2, matching: ["Cancelled"])
@@ -2352,7 +2381,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     formattingPreferences: self.formattingPreferences,
                     outputLanguage: self.outputLanguage,
                     dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
-                    cleanupLevel: self.cleanupLevel
+                    cleanupLevel: self.cleanupLevel,
+                    pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste,
+                    learnedCorrections: self.learnedCorrections.active
                 )
                 await MainActor.run {
                     let finalTranscript = result.finalTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2544,6 +2575,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// Invalidates prior insertion actions before taking the new start-time snapshot, including during delays.
     private func scheduleShortcutStart(mode: RecordingTriggerMode) {
         textInsertionTargetID = nil
+        correctionWatcher.stop(.newDictation)
         cancelPendingShortcutStart(resetMode: false)
         pendingSelectionSnapshot = contextService.collectSelectionSnapshot(captureInsertionTarget: originalFieldInsertionEnabled)
         pendingManualCommandInvocation = hotkeyManager.currentPressedModifiers.contains(
@@ -2692,6 +2724,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         startedAt: CFAbsoluteTime? = nil
     ) -> Bool {
         textInsertionTargetID = nil
+        correctionWatcher.stop(.newDictation)
         activeRecordingTriggerMode = triggerMode
         let isAccessibilityTrusted = AXIsProcessTrusted()
         hasAccessibility = isAccessibilityTrusted
@@ -3173,7 +3206,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         outputLanguage: String = "",
         dictationLanguage: String = "",
         cleanupLevel: CleanupLevel,
-        pressesEnterAfterPaste: Bool
+        pressesEnterAfterPaste: Bool,
+        learnedCorrections: [LearnedCorrection] = []
     ) async -> (finalTranscript: String, outcome: TranscriptProcessingOutcome, prompt: String) {
         let trimmedRawTranscript = rawTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -3202,6 +3236,16 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return (macro.payload, .voiceMacro(command: macro.command), "")
         }
 
+        // Learned corrections apply before, and independent of, the cleanup model, so they
+        // also hold when cleanup is skipped.
+        let corrected = LearnedCorrectionApplier.apply(to: trimmedRawTranscript, corrections: learnedCorrections)
+        if !corrected.appliedIDs.isEmpty {
+            await MainActor.run { [weak self] in
+                self?.learnedCorrections.markApplied(ids: corrected.appliedIDs)
+            }
+        }
+        let correctedTranscript = corrected.text
+
         // Cleanup level None (formerly "Preserve exact wording"). Two sub-cases so translation
         // stays honored:
         //
@@ -3216,11 +3260,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         if cleanupLevel == .none {
             let targetLanguage = outputLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
             if targetLanguage.isEmpty {
-                return (trimmedRawTranscript, .preservedExactWording, "")
+                return (correctedTranscript, .preservedExactWording, "")
             }
             do {
                 let result = try await postProcessingService.translateVerbatim(
-                    transcript: trimmedRawTranscript,
+                    transcript: correctedTranscript,
                     targetLanguage: targetLanguage
                 )
                 return (result.transcript, .preservedExactWordingTranslated, result.prompt)
@@ -3228,7 +3272,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 os_log(.error, log: recordingLog,
                        "Verbatim translation failed: %{public}@",
                        error.localizedDescription)
-                return (trimmedRawTranscript, .preservedExactWordingTranslationFailedFallback, "")
+                return (correctedTranscript, .preservedExactWordingTranslationFailedFallback, "")
             }
         }
 
@@ -3247,13 +3291,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
             ),
             vocabularyTerms: VocabularyList.terms(from: customVocabulary)
         )
-        if CleanupBypass.canSkipCleanup(transcript: trimmedRawTranscript, settings: bypassSettings) {
-            return (trimmedRawTranscript, .skippedCleanupAlreadyClean, "")
+        if CleanupBypass.canSkipCleanup(transcript: correctedTranscript, settings: bypassSettings) {
+            return (correctedTranscript, .skippedCleanupAlreadyClean, "")
         }
 
         do {
             let result = try await postProcessingService.postProcess(
-                transcript: trimmedRawTranscript,
+                transcript: correctedTranscript,
                 context: context,
                 customVocabulary: customVocabulary,
                 customSystemPrompt: customSystemPrompt,
@@ -3265,12 +3309,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 formattingPrompt: formattingPreferences.promptSection,
                 cleanupLevel: cleanupLevel,
                 outputLanguage: outputLanguage,
-                dictationLanguage: dictationLanguage
+                dictationLanguage: dictationLanguage,
+                knownCorrections: learnedCorrections
             )
             return (result.transcript, .postProcessingSucceeded, result.prompt)
         } catch {
             os_log(.error, log: recordingLog, "Post-processing failed: %{public}@", error.localizedDescription)
-            return (trimmedRawTranscript, .postProcessingFailedFallback, "")
+            return (correctedTranscript, .postProcessingFailedFallback, "")
         }
     }
 
@@ -3493,7 +3538,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         outputLanguage: self.outputLanguage,
                         dictationLanguage: Self.dictationLanguageName(for: self.transcriptionLanguage),
                         cleanupLevel: self.cleanupLevel,
-                        pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste
+                        pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste,
+                        learnedCorrections: self.learnedCorrections.active
                     )
                     timeline.mark(.cleanupDone)
                     let cleanedTimeline = timeline
@@ -3588,6 +3634,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 shouldPressEnter: shouldPressEnterAfterPaste,
                                 useOriginalField: useOriginalFieldInsertion
                             )
+                            if !shouldPressEnterAfterPaste, Self.isLearnableDictation(result.outcome) {
+                                self.correctionWatcher.start(insertedText: trimmedFinalTranscript)
+                            }
                         }
 
                         self.audioRecorder.cleanup()
@@ -3644,6 +3693,34 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Only dictated text is watched; macros and Edit Mode output are not the speaker's words.
+    private static func isLearnableDictation(_ outcome: TranscriptProcessingOutcome) -> Bool {
+        switch outcome {
+        case .postProcessingSucceeded, .postProcessingFailedFallback, .preservedExactWording:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Learns a pair from the correction watcher and offers Undo, which also keeps the
+    /// pair from being learned again.
+    private func learnCorrection(heard: String, meant: String) {
+        guard learnFromCorrectionsEnabled,
+              let learned = learnedCorrections.learn(heard: heard, meant: meant) else { return }
+        correctionLearnedToast.show(meant: learned.meant) { [weak self] in
+            self?.removeLearnedCorrection(id: learned.id)
+        }
+    }
+
+    func removeLearnedCorrection(id: UUID) {
+        learnedCorrections.remove(id: id)
+    }
+
+    func clearLearnedCorrections() {
+        learnedCorrections.clearAll()
     }
 
     static func resolvedSystemPrompt(_ customSystemPrompt: String) -> String {

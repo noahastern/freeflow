@@ -18,6 +18,7 @@ enum PostProcessingServiceTests {
         testSelfCorrectionsAreScoped()
         testFormattingPreferencesComeAfterAppStyle()
         testTruncatedCleanupIsRejected()
+        testKnownCorrectionsReachModelButNotHistory()
     }
 
     // Regression: one "sorry" near the end of a long prompt dictation made the
@@ -284,6 +285,59 @@ enum PostProcessingServiceTests {
             TestSupport.expect(false, "Output cut off at the token limit must not be returned as a cleanup")
             return
         }
+    }
+
+    /// Learned pairs are user-derived, so the saved prompt keeps only a count.
+    private static func testKnownCorrectionsReachModelButNotHistory() {
+        let recorder = RequestRecorder()
+        let service = PostProcessingService(
+            apiKey: "synthetic-key",
+            baseURL: "https://example.invalid/v1",
+            preferredModel: "synthetic-primary",
+            preferredFallbackModel: "synthetic-fallback",
+            transport: { request in
+                recorder.record(request.httpBody)
+                let body = try JSONSerialization.data(withJSONObject: [
+                    "choices": [["message": ["content": "Deploy it to Kubernetes."]]]
+                ])
+                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+                return (body, response)
+            }
+        )
+        let context = AppContext(
+            appName: nil, bundleIdentifier: nil, windowTitle: nil, selectedText: nil, currentActivity: "",
+            contextSystemPrompt: nil, contextPrompt: nil, screenshotDataURL: nil, screenshotMimeType: nil, screenshotError: nil
+        )
+        let pair = LearnedCorrection(
+            id: UUID(), heard: "cooper netties", meant: "Kubernetes", count: 1, lastUsed: Date(), isRemoved: false
+        )
+        let box = PromptBox()
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            box.prompt = (try? await service.postProcess(
+                transcript: "deploy it to cooper nettys",
+                context: context,
+                customVocabulary: "",
+                knownCorrections: [pair]
+            ))?.prompt
+            done.signal()
+        }
+        done.wait()
+
+        let request = recorder.captured[0]
+        TestSupport.expect(request.systemPrompt.contains("KNOWN CORRECTIONS."), "Pairs must reach the cleanup model")
+        TestSupport.expect(request.systemPrompt.contains("\"cooper netties\" -> \"Kubernetes\""), "Pair must be listed")
+        TestSupport.expect(request.systemPrompt.hasPrefix(PostProcessingService.defaultSystemPrompt), "Corrections must only append")
+        let saved = box.prompt ?? ""
+        TestSupport.expect(saved.contains("KNOWN CORRECTIONS: 1 learned pair"), "History must note that pairs were sent")
+        TestSupport.expect(!saved.contains("\"cooper netties\" -> "), "Saved prompt must not list pairs")
+
+        let none = cleanupRequests(dictationLanguage: "") { _ in "Synthetic cleaned text." }
+        TestSupport.expect(!none[0].systemPrompt.contains("KNOWN CORRECTIONS"), "No pairs means no section")
+    }
+
+    private final class PromptBox: @unchecked Sendable {
+        var prompt: String?
     }
 
     private final class ErrorBox: @unchecked Sendable {

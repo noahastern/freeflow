@@ -241,7 +241,8 @@ Behavior:
         formattingPrompt: String = "",
         cleanupLevel: CleanupLevel = .medium,
         outputLanguage: String = "",
-        dictationLanguage: String = ""
+        dictationLanguage: String = "",
+        knownCorrections: [LearnedCorrection] = []
     ) async throws -> PostProcessingResult {
         let vocabularyTerms = mergedVocabularyTerms(rawVocabulary: customVocabulary)
 
@@ -260,7 +261,8 @@ Behavior:
                     formattingPrompt: formattingPrompt,
                     cleanupLevel: cleanupLevel,
                     outputLanguage: outputLanguage,
-                    dictationLanguage: dictationLanguage
+                    dictationLanguage: dictationLanguage,
+                    knownCorrections: knownCorrections
                 )
             }
 
@@ -394,7 +396,8 @@ Behavior:
         formattingPrompt: String = "",
         cleanupLevel: CleanupLevel = .medium,
         outputLanguage: String = "",
-        dictationLanguage: String = ""
+        dictationLanguage: String = "",
+        knownCorrections: [LearnedCorrection] = []
     ) async throws -> PostProcessingResult {
         var primaryModel = resolvedPrimaryModel()
         let retryModel = resolvedRetryModel(for: primaryModel)
@@ -418,7 +421,8 @@ Behavior:
                 formattingPrompt: formattingPrompt,
                 cleanupLevel: cleanupLevel,
                 outputLanguage: outputLanguage,
-                dictationLanguage: dictationLanguage
+                dictationLanguage: dictationLanguage,
+                knownCorrections: knownCorrections
             )
         } catch let error as PostProcessingError {
             // Unified fallback policy: decide whether to retry on the other model.
@@ -469,7 +473,8 @@ Behavior:
                     formattingPrompt: formattingPrompt,
                     cleanupLevel: cleanupLevel,
                     outputLanguage: outputLanguage,
-                    dictationLanguage: dictationLanguage
+                    dictationLanguage: dictationLanguage,
+                    knownCorrections: knownCorrections
                 )
             } catch PostProcessingError.suspectedInstructionExecution {
                 return PostProcessingResult(
@@ -568,7 +573,8 @@ Behavior:
         formattingPrompt: String = "",
         cleanupLevel: CleanupLevel = .medium,
         outputLanguage: String = "",
-        dictationLanguage: String = ""
+        dictationLanguage: String = "",
+        knownCorrections: [LearnedCorrection] = []
     ) async throws -> PostProcessingResult {
         var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
         request.httpMethod = "POST"
@@ -598,6 +604,14 @@ Behavior:
         if !vocabularyPrompt.isEmpty {
             systemPrompt += "\n\n" + vocabularyPrompt
         }
+        // Learned pairs reach the model but not saved history or exports, which only
+        // note how many were sent.
+        var systemPromptForDisplay = systemPrompt
+        let corrections = LearnedCorrectionPrompt.section(for: knownCorrections, transcript: transcript)
+        if corrections.pairCount > 0 {
+            systemPrompt += "\n\n" + corrections.text
+            systemPromptForDisplay += "\n\n" + LearnedCorrectionPrompt.historyPlaceholder(pairCount: corrections.pairCount)
+        }
 
         let vocabularyReminder = VocabularyPrompt.reminder(for: customVocabulary)
         let vocabularyReminderSection = vocabularyReminder.isEmpty ? "" : "\n\n" + vocabularyReminder
@@ -617,7 +631,7 @@ RAW_TRANSCRIPTION
 Model: \(model)
 
 [System]
-\(systemPrompt)
+\(systemPromptForDisplay)
 
 [User]
 \(userMessage)
