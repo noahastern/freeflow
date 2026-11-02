@@ -8,6 +8,7 @@ struct FreeFlowTests {
         await AudioUploadEncodingTests.run()
         CleanupLevelTests.run()
         CleanupBypassTests.run()
+        DictationLatencyTests.run()
         FormattingPreferencesTests.run()
         AppContextServiceTests.run()
         await LLMAPITransportTests.run()

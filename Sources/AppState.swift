@@ -684,6 +684,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var textInsertionTargetID: UUID?
     private var currentSessionIntent: SessionIntent = .dictation
     private var pendingSelectionSnapshot: AppSelectionSnapshot?
+    /// Timings for the dictation whose paste is waiting on shortcut release.
+    private var pendingLatencyTimeline: DictationLatencyTimeline?
     private var pendingManualCommandInvocation = false
     private var pendingShortcutStartTask: Task<Void, Never>?
     private var pendingShortcutStartMode: RecordingTriggerMode?
@@ -2882,6 +2884,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func stopAndTranscribe() {
+        let keyReleaseTimeline = DictationLatencyTimeline(keyReleasedAt: DictationLatencyTimeline.now())
+        pendingLatencyTimeline = nil
         cancelPendingShortcutStart()
         shortcutSessionController.reset()
         let textInsertionTarget = activeTextInsertionTarget
@@ -2935,6 +2939,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return
             }
 
+            var finalizedTimeline = keyReleaseTimeline
+            finalizedTimeline.mark(.audioFinalized)
+            finalizedTimeline.wavBytes = DictationLatencyTimeline.fileSize(at: fileURL)
+            finalizedTimeline.flacBytes = DictationLatencyTimeline.fileSize(at: compressedFileURL)
             let savedAudioFile = Self.saveAudioFile(from: fileURL)
             let transcriptionFileURL = savedAudioFile?.fileURL ?? fileURL
             self.transcribingAudioFileName = savedAudioFile?.fileName
@@ -2978,6 +2986,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         compressedFileURL: compressedFileURL
                     )
                     let rawTranscript = try await transcript
+                    var timeline = finalizedTimeline
+                    timeline.mark(.transcriptReceived)
                     let parsedTranscript = Self.parseTranscriptCommands(
                         from: rawTranscript,
                         pressEnterCommandEnabled: self.isPressEnterVoiceCommandEnabled
@@ -2997,6 +3007,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         sessionContext,
                         inFlight: inFlightContextTask
                     )
+                    timeline.mark(.contextReady)
                     try Task.checkCancellation()
                     await MainActor.run { [weak self] in
                         self?.debugStatusMessage = "Running post-processing"
@@ -3015,6 +3026,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         cleanupLevel: self.cleanupLevel,
                         pressesEnterAfterPaste: parsedTranscript.shouldPressEnterAfterPaste
                     )
+                    timeline.mark(.cleanupDone)
+                    let cleanedTimeline = timeline
                     try Task.checkCancellation()
 
                     await MainActor.run {
@@ -3068,6 +3081,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         }
 
                         if trimmedFinalTranscript.isEmpty {
+                            Self.logLatency(cleanedTimeline)
                             self.statusText = shouldPressEnterAfterPaste ? enterOnlyStatusText : "Nothing to transcribe"
                             self.clearPendingOverlayDismissToken()
                             if !self.showPostTranscriptionUpdateReminderIfNeeded() {
@@ -3097,6 +3111,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                                 }
                             }
 
+                            // Logged once the paste runs, in performAfterShortcutReleased.
+                            self.pendingLatencyTimeline = cleanedTimeline
                             self.insertTranscriptWhenShortcutReleased(
                                 trimmedFinalTranscript, target: textInsertionTarget,
                                 shouldPressEnter: shouldPressEnterAfterPaste,
@@ -3920,9 +3936,22 @@ final class AppState: ObservableObject, @unchecked Sendable {
             return
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + pasteAfterShortcutReleaseDelay) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + pasteAfterShortcutReleaseDelay) { [weak self] in
             action()
+            self?.logPendingLatencyAfterPaste()
         }
+    }
+
+    private func logPendingLatencyAfterPaste() {
+        guard var timeline = pendingLatencyTimeline else { return }
+        pendingLatencyTimeline = nil
+        timeline.mark(.pasted)
+        Self.logLatency(timeline)
+    }
+
+    /// One line per dictation: integer milliseconds and byte counts only, never text.
+    private static func logLatency(_ timeline: DictationLatencyTimeline) {
+        os_log(.info, log: recordingLog, "dictation latency %{public}@", timeline.logLine)
     }
 
     private func pasteAtCursorWhenShortcutReleased(completion: (() -> Void)? = nil) {
