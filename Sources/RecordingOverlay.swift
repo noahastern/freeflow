@@ -18,6 +18,11 @@ final class RecordingOverlayState: ObservableObject {
     @Published var updateVersion: String = ""
     @Published var errorMessage: String?
     @Published var toastID: UUID?
+    /// Short informational toast, e.g. "Dictation cancelled" or "Copied to clipboard".
+    @Published var noticeMessage = ""
+    @Published var noticeSystemImage = "checkmark.circle.fill"
+    /// When set, the whole notice pill is a button with this trailing label.
+    @Published var noticeActionTitle: String?
 
     /// Tap-to-toggle recordings show a discard X and a finish checkmark;
     /// the panel only accepts clicks in that mode.
@@ -46,6 +51,7 @@ enum OverlayPhase {
     case transcribing
     case feedback
     case updateAvailable
+    case notice
 }
 
 // MARK: - NSScreen Helpers
@@ -171,6 +177,7 @@ final class RecordingOverlayManager {
     var onStopButtonPressed: (() -> Void)?
     var onCancelButtonPressed: (() -> Void)?
     var onUpdateOverlayPressed: (() -> Void)?
+    var onNoticeActionPressed: (() -> Void)?
 
     /// The screen the overlay should drop down on. The user picks one of
     /// three modes in Settings, stored in UserDefaults under
@@ -224,6 +231,7 @@ final class RecordingOverlayManager {
     private var overlayAcceptsMouseEvents: Bool {
         (overlayState.phase == .recording && overlayState.recordingTriggerMode == .toggle)
             || overlayState.phase == .updateAvailable
+            || (overlayState.phase == .notice && overlayState.noticeActionTitle != nil)
     }
 
     func showRecording(
@@ -334,6 +342,22 @@ final class RecordingOverlayManager {
         }
     }
 
+    /// Shows a short notice in the overlay's usual position. With an
+    /// `actionTitle`, the pill accepts clicks (the panel stays non-activating,
+    /// so the focused app keeps focus) and calls `onNoticeActionPressed`.
+    /// The caller owns dismissal timing.
+    func showNotice(message: String, systemImage: String, actionTitle: String? = nil) {
+        DispatchQueue.main.async {
+            self.lockedOverlayWidth = nil
+            self.overlayState.isCommandMode = false
+            self.overlayState.noticeMessage = message
+            self.overlayState.noticeSystemImage = systemImage
+            self.overlayState.noticeActionTitle = actionTitle
+            self.overlayState.phase = .notice
+            self.showOverlayPanel(animatedResize: true)
+        }
+    }
+
     func dismiss() {
         DispatchQueue.main.async {
             self.dismissAll()
@@ -420,6 +444,9 @@ final class RecordingOverlayManager {
         let onCancelButtonPressed: () -> Void = { [weak self] in
             self?.onCancelButtonPressed?()
         }
+        let onNoticeActionPressed: () -> Void = { [weak self] in
+            self?.onNoticeActionPressed?()
+        }
 
         if useWingedLayout {
             // Winged layout: notch x-range stays solid black so the cutout masks it.
@@ -450,7 +477,8 @@ final class RecordingOverlayManager {
                     onCancelButtonPressed: onCancelButtonPressed,
                     onUpdateOverlayPressed: { [weak self] in
                         self?.onUpdateOverlayPressed?()
-                    }
+                    },
+                    onNoticeActionPressed: onNoticeActionPressed
                 )
             )
         }
@@ -466,7 +494,8 @@ final class RecordingOverlayManager {
                     onCancelButtonPressed: onCancelButtonPressed,
                     onUpdateOverlayPressed: { [weak self] in
                         self?.onUpdateOverlayPressed?()
-                    }
+                    },
+                    onNoticeActionPressed: onNoticeActionPressed
                 )
                 .padding(.top, screenHasNotch ? notchOverlap : 0)
             )
@@ -496,7 +525,7 @@ final class RecordingOverlayManager {
             return true
         case .feedback:
             return overlayState.errorMessage?.isEmpty ?? true
-        case .updateAvailable:
+        case .updateAvailable, .notice:
             return false
         }
     }
@@ -537,8 +566,9 @@ final class RecordingOverlayManager {
         }
 
         let useCompact = placement == .menuBar
-        let forceDropDownPill = overlayState.phase == .feedback
-            && !(overlayState.errorMessage?.isEmpty ?? true)
+        let forceDropDownPill = (overlayState.phase == .feedback
+            && !(overlayState.errorMessage?.isEmpty ?? true))
+            || overlayState.phase == .notice
         // Compact mode: overlay sits flush with the menu bar on every display.
         // notchOverlap equals the menu-bar height on non-notched screens too,
         // so zero protrusion is universal — not notch-only. The legacy
@@ -578,6 +608,12 @@ final class RecordingOverlayManager {
             }()
             guard screenHasNotch else { return feedbackWidth }
             return max(notchWidth, feedbackWidth)
+        }
+
+        if overlayState.phase == .notice {
+            let noticeWidth = NoticeOverlayView.width(for: overlayState)
+            guard screenHasNotch else { return noticeWidth }
+            return max(notchWidth, noticeWidth)
         }
 
         if overlayState.phase == .updateAvailable {
@@ -628,6 +664,7 @@ final class RecordingOverlayManager {
         overlayState.isAwaitingAudio = false
         overlayState.isCommandMode = false
         overlayState.updateVersion = ""
+        overlayState.noticeActionTitle = nil
         if let panel = overlayWindow {
             panel.orderOut(nil)
             // orderOut alone leaves the panel retained in NSApp.windows with its
@@ -921,6 +958,7 @@ struct RecordingOverlayView: View {
     let onStopButtonPressed: () -> Void
     let onCancelButtonPressed: () -> Void
     let onUpdateOverlayPressed: () -> Void
+    let onNoticeActionPressed: () -> Void
 
     private let controlDiameter: CGFloat = 16
 
@@ -940,6 +978,8 @@ struct RecordingOverlayView: View {
                 FailureIndicatorView()
             } else if state.phase == .updateAvailable {
                 UpdateAvailableOverlayView(onPress: onUpdateOverlayPressed)
+            } else if state.phase == .notice {
+                NoticeOverlayView(state: state, onPress: onNoticeActionPressed)
             } else {
                 ZStack {
                     Group {
@@ -1025,6 +1065,7 @@ struct BottomPillOverlayView: View {
     let onStopButtonPressed: () -> Void
     let onCancelButtonPressed: () -> Void
     let onUpdateOverlayPressed: () -> Void
+    let onNoticeActionPressed: () -> Void
 
     static let height: CGFloat = 28
     private static let horizontalPadding: CGFloat = 12
@@ -1046,6 +1087,8 @@ struct BottomPillOverlayView: View {
             return min(420, max(180, CGFloat(message.count) * 6.8 + 60))
         case .updateAvailable:
             return 150
+        case .notice:
+            return NoticeOverlayView.width(for: state)
         case .recording, .transcribing:
             var content = waveformSize.width
             if state.isCommandMode { content += commandIndicatorWidth + itemSpacing }
@@ -1074,6 +1117,9 @@ struct BottomPillOverlayView: View {
                 }
             case .updateAvailable:
                 UpdateAvailableOverlayView(onPress: onUpdateOverlayPressed)
+                    .padding(.horizontal, Self.horizontalPadding)
+            case .notice:
+                NoticeOverlayView(state: state, onPress: onNoticeActionPressed)
                     .padding(.horizontal, Self.horizontalPadding)
             case .recording, .transcribing:
                 recordingContent
@@ -1203,5 +1249,57 @@ struct UpdateAvailableOverlayView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Informational toast with an optional action, e.g. "Dictation cancelled — Undo".
+/// With an action the whole pill is the button, so it is an easy target.
+struct NoticeOverlayView: View {
+    @ObservedObject var state: RecordingOverlayState
+    let onPress: () -> Void
+
+    /// Same character-count estimate the error toast uses, clamped so short
+    /// notices stay compact and long ones never stretch across the menu bar.
+    static func width(for state: RecordingOverlayState) -> CGFloat {
+        var characters = state.noticeMessage.count
+        if let action = state.noticeActionTitle {
+            characters += action.count + 3
+        }
+        return min(360, max(150, CGFloat(characters) * 6.8 + 60))
+    }
+
+    var body: some View {
+        if let actionTitle = state.noticeActionTitle {
+            Button(action: onPress) {
+                content(actionTitle: actionTitle)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(state.noticeMessage). \(actionTitle)")
+        } else {
+            content(actionTitle: nil)
+        }
+    }
+
+    private func content(actionTitle: String?) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: state.noticeSystemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+            Text(state.noticeMessage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if let actionTitle {
+                Text("\u{2014}")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+                Text(actionTitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .contentShape(Rectangle())
     }
 }
