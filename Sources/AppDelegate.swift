@@ -37,6 +37,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // Delete audio from a dictation cancelled with Escape whose Undo
+        // window is still open, as its expiry would have.
+        appState.discardPendingEscapeUndo()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         guard appState.hasCompletedSetup else { return true }
         if !flag {

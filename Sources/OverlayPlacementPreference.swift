@@ -45,6 +45,10 @@ enum OverlayPlacementPreference {
 
 /// What pressing Escape does while FreeFlow is recording or transcribing.
 enum EscapeKeyBehavior: String, CaseIterable, Identifiable {
+    /// Stop the current recording or transcription without pasting, and
+    /// offer a short Undo that finishes it in the background and copies
+    /// the result to the clipboard.
+    case cancelWithUndo
     /// Stop and throw away the current recording or transcription.
     case discard
     /// Leave the recording running and let Escape reach the active app.
@@ -52,8 +56,14 @@ enum EscapeKeyBehavior: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    /// True when Escape stops FreeFlow instead of reaching the active app.
+    var interceptsEscape: Bool {
+        self != .ignore
+    }
+
     var title: String {
         switch self {
+        case .cancelWithUndo: return "Cancel, with Undo"
         case .discard: return "Discard recording"
         case .ignore: return "Do nothing"
         }
@@ -62,7 +72,9 @@ enum EscapeKeyBehavior: String, CaseIterable, Identifiable {
 
 enum EscapeKeyPreference {
     static let storageKey = "escape_key_behavior"
-    static let defaultBehavior: EscapeKeyBehavior = .discard
+    /// Only applies when nothing is stored, so an explicit Discard or Do
+    /// nothing choice is never migrated.
+    static let defaultBehavior: EscapeKeyBehavior = .cancelWithUndo
 
     static func load(from defaults: UserDefaults) -> EscapeKeyBehavior {
         defaults.string(forKey: storageKey).flatMap(EscapeKeyBehavior.init(rawValue:)) ?? defaultBehavior

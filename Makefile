@@ -28,6 +28,7 @@ TEST_PRODUCTION_SOURCES = \
 	Sources/AppTextInsertionTarget.swift \
 	Sources/AudioUploadEncoding.swift \
 	Sources/ContextInferenceFailure.swift \
+	Sources/EscapeUndoCore.swift \
 	Sources/LLMAPITransport.swift \
 	Sources/LLMCooldownManager.swift \
 	Sources/MicrophoneReadinessPreference.swift \

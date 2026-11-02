@@ -5,7 +5,7 @@ enum OverlayPlacementPreferenceTests {
     static func run() {
         testPlacementMigratesLegacyCompactToggle()
         testBottomFrameSitsJustAboveBottomEdge()
-        testEscapeBehaviorDefaultsToDiscard()
+        testEscapeBehaviorDefaultsToCancelWithUndo()
     }
 
     private static func makeDefaults(_ name: String) -> (UserDefaults, String) {
@@ -45,20 +45,32 @@ enum OverlayPlacementPreferenceTests {
         TestSupport.expectEqual(frame.size, CGSize(width: 150, height: 36))
     }
 
-    private static func testEscapeBehaviorDefaultsToDiscard() {
+    private static func testEscapeBehaviorDefaultsToCancelWithUndo() {
         let (defaults, suite) = makeDefaults("EscapeKey")
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        TestSupport.expectEqual(EscapeKeyPreference.load(from: defaults), .discard)
+        TestSupport.expectEqual(EscapeKeyPreference.load(from: defaults), .cancelWithUndo)
         TestSupport.expect(
             defaults.object(forKey: EscapeKeyPreference.storageKey) == nil,
             "Loading the default must not persist a choice"
         )
 
+        // Explicit earlier choices are kept as-is; only unset installs move
+        // to the new default.
+        defaults.set(EscapeKeyBehavior.discard.rawValue, forKey: EscapeKeyPreference.storageKey)
+        TestSupport.expectEqual(EscapeKeyPreference.load(from: defaults), .discard)
+
         defaults.set(EscapeKeyBehavior.ignore.rawValue, forKey: EscapeKeyPreference.storageKey)
         TestSupport.expectEqual(EscapeKeyPreference.load(from: defaults), .ignore)
 
+        defaults.set(EscapeKeyBehavior.cancelWithUndo.rawValue, forKey: EscapeKeyPreference.storageKey)
+        TestSupport.expectEqual(EscapeKeyPreference.load(from: defaults), .cancelWithUndo)
+
         defaults.set("bogus", forKey: EscapeKeyPreference.storageKey)
-        TestSupport.expectEqual(EscapeKeyPreference.load(from: defaults), .discard)
+        TestSupport.expectEqual(EscapeKeyPreference.load(from: defaults), .cancelWithUndo)
+
+        TestSupport.expect(EscapeKeyBehavior.cancelWithUndo.interceptsEscape, "Cancel with Undo stops FreeFlow")
+        TestSupport.expect(EscapeKeyBehavior.discard.interceptsEscape, "Discard stops FreeFlow")
+        TestSupport.expect(!EscapeKeyBehavior.ignore.interceptsEscape, "Do nothing passes Escape through")
     }
 }
